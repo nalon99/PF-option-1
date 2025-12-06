@@ -79,12 +79,14 @@ class TracingSession:
             "started_at": datetime.now().isoformat()
         }
         
-        # Create the root span for the session
-        self.root_span = langfuse_client.start_as_current_span(
+        # Create the root span for the session using context manager
+        self._root_context = langfuse_client.start_as_current_span(
             name=self.session_name,
             input={"contract_id": self.contract_id},
             metadata=self.metadata
         )
+        # Enter the context to get the actual span
+        self.root_span = self._root_context.__enter__()
         print(f"📊 Tracing session started: {self.session_id}")
     
     def create_span(
@@ -121,15 +123,19 @@ class TracingSession:
     
     def end(self, output: Optional[Any] = None, status: str = "success"):
         """End the tracing session."""
-        self.root_span.update(
-            output=output,
-            metadata={
-                **self.metadata,
-                "ended_at": datetime.now().isoformat(),
-                "status": status
-            }
-        )
-        self.root_span.end()
+        if self.root_span:
+            self.root_span.update(
+                output=output,
+                metadata={
+                    **self.metadata,
+                    "ended_at": datetime.now().isoformat(),
+                    "status": status
+                }
+            )
+            self.root_span.end()
+        # Exit the context manager
+        if hasattr(self, '_root_context') and self._root_context:
+            self._root_context.__exit__(None, None, None)
         # Flush to ensure all traces are sent
         langfuse_client.flush()
         print(f"📊 Tracing session ended: {self.session_id}")
