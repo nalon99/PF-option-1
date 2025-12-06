@@ -28,6 +28,27 @@ This project aims to analyze legal contracts imported from scanned images, to id
 
 ## 2. Agents workflow and collaboration pattern
 
+```txt
+┌─────────────────────┐  
+│   image_parser.py   │  
+│  parse_contract_*   │  
+└──────────┬──────────┘  
+           │ List[ParsedContractPage]  
+           ▼  
+┌─────────────────────────────────────┐  
+│  ContextualizationAgent (Agent 1)   │  
+├─────────────────────────────────────┤  
+│  Step 1: assemble_document()        │  ← LLM merges pages  
+│  Step 2: align_documents()          │  ← LLM aligns sections  
+└──────────┬──────────────────────────┘  
+           │ ContextualizationOutput  
+           ▼  
+┌─────────────────────┐  
+│  ExtractionAgent    │  
+│     (Agent 2)       │  
+└─────────────────────┘  
+
+```
 ## 3. Setup instructions
 
 ## 4. Usage

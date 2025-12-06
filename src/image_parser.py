@@ -8,18 +8,20 @@ Functions for:
 - Vision-specific prompts for contract parsing
 - Extracts structured text preserving document hierarchy (sections, subsections, clauses)
 - Handles various image qualities (scanned, photographed, different resolutions)
+- Langfuse tracing integration for monitoring
 """
 
 import os
 import json
 import base64
-from typing import Optional
+from typing import List, Optional
 from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
 from models import ParsedContractPage
+from tracing import TracingSession, trace_llm_call
 
 # Load environment variables
 load_dotenv(override=True)
@@ -101,39 +103,58 @@ def get_image_media_type(image_path: str) -> str:
     return media_types.get(ext, "image/png")
 
 
+# Hierarchical extraction prompt for legal documents
 SYSTEM_PROMPT = """You are a document parsing assistant specialized in extracting content from scanned legal documents.
 
-Extract the content from the image and return a JSON object with this structure:
+Extract the content preserving the HIERARCHICAL STRUCTURE. Return a JSON object with this exact structure:
+
 {
     "page_number": <integer>,
-    "sections": ["Section I Title", "Section II Title", ...],
-    "content": "<full text content preserving structure>"
+    "sections": [
+        {
+            "id": "<section number, e.g., 'I', 'II', '1', '2'>",
+            "title": "<section title, e.g., 'TERM AND TERMINATION'>",
+            "content": "<optional preamble text before clauses>",
+            "clauses": [
+                {
+                    "id": "<clause number, e.g., '1.1', '2.3'>",
+                    "title": "<clause title if present, e.g., 'Scope of Work'>",
+                    "content": "<full clause text>"
+                }
+            ],
+            "subsections": []
+        }
+    ],
+    "raw_content": "<full page text as fallback>"
 }
 
 Rules:
-1. Preserve document hierarchy (sections, subsections, clauses)
-2. Remove formatting markers (**, *, etc.) from the output
-3. Convert numerical values in words to digits when clear (e.g., "fifteen thousand" → 15000)
-4. Use "|" to represent unrecognizable characters
-5. Maintain paragraph breaks with newlines
-6. Include section numbers and titles in the sections array
+1. PRESERVE document hierarchy: Section → Clauses → Subclauses
+2. Section IDs are typically Roman numerals (I, II, III) or numbers (1, 2, 3)
+3. Clause IDs are typically decimal numbers (1.1, 1.2, 2.1)
+4. Remove formatting markers (**, *, etc.) from the output
+5. Convert numerical values in words to digits when clear (e.g., "fifteen thousand" → 15000)
+6. Use "|" to represent unrecognizable characters
+7. If a section continues from a previous page, still include it with available content
+8. Include raw_content as a fallback with the full page text
 """
 
 
 def parse_contract_image(
     image_path: str,
-    page_number: int = 1
+    page_number: int,
+    session: TracingSession
 ) -> Optional[ParsedContractPage]:
     """
-    Parse a contract image and extract structured content.
+    Parse a contract image and extract hierarchical structured content.
     
     Args:
         image_path: Path to the contract image file
         page_number: Page number for this image (1-indexed)
-        model: Optional model override
+        session: TracingSession for Langfuse monitoring (REQUIRED)
         
     Returns:
-        ParsedContractPage object with validated content, or None on error
+        ParsedContractPage object with validated hierarchical content, or None on error
     """
     # Validate image
     is_valid, error_msg = validate_image(image_path)
@@ -147,33 +168,53 @@ def parse_contract_image(
     
     print(f"Sending image to LLM ({AI_MODEL})...")
     
+    # Create span for tracing (REQUIRED)
+    span = session.create_span(
+        name=f"parse_image_page_{page_number}",
+        input_data={"image_path": str(image_path), "page_number": page_number},
+        metadata={"agent": "image_parser", "operation": "parse_image"}
+    )
+    
     try:
-        completion = client.chat.completions.create(
-            model=AI_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{media_type};base64,{base64_img}"
+        # Trace LLM call (REQUIRED)
+        with trace_llm_call(session, f"llm_parse_page_{page_number}", AI_MODEL, "image_parser") as gen:
+            completion = client.chat.completions.create(
+                model=AI_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SYSTEM_PROMPT
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{base64_img}"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": f"Extract the hierarchical content from this contract page (page {page_number})."
                             }
-                        },
-                        {
-                            "type": "text",
-                            "text": f"Extract the content from this contract page (page {page_number})."
-                        }
-                    ]
-                }
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.0
-        )
+                        ]
+                    }
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0
+            )
+            
+            # Update trace with usage info
+            if hasattr(completion, 'usage') and completion.usage:
+                gen.update(
+                    output=completion.choices[0].message.content[:500],  # Truncate for trace
+                    usage={
+                        "input": completion.usage.prompt_tokens,
+                        "output": completion.usage.completion_tokens,
+                        "total": completion.usage.total_tokens
+                    }
+                )
         
         # Parse the response
         response_content = completion.choices[0].message.content
@@ -185,28 +226,42 @@ def parse_contract_image(
         # Validate with Pydantic model
         validated_page = ParsedContractPage.model_validate(parsed_json)
         print(f"✅ Page {page_number} parsed and validated successfully")
+        print(f"   Found {len(validated_page.sections)} sections")
+        
+        # Update span with success
+        span.update(
+            output={"success": True, "sections_found": len(validated_page.sections)},
+            status_message="success"
+        )
+        
         return validated_page
         
     except json.JSONDecodeError as e:
-        print(f"JSON parsing error: {e}")
+        print(f"❌ JSON parsing error: {e}")
+        span.update(output={"error": str(e)}, status_message="error")
         return None
     except ValidationError as e:
-        print(f"Validation error: {e}")
+        print(f"❌ Validation error: {e}")
+        span.update(output={"error": str(e)}, status_message="error")
         return None
     except Exception as e:
-        print(f"Error parsing image: {e}")
+        print(f"❌ Error parsing image: {e}")
+        span.update(output={"error": str(e)}, status_message="error")
         return None
+    finally:
+        span.end()
 
 
 def parse_contract_folder(
-    folder_path: str
-) -> list[ParsedContractPage]:
+    folder_path: str,
+    session: TracingSession
+) -> List[ParsedContractPage]:
     """
     Parse all contract images in a folder.
     
     Args:
         folder_path: Path to folder containing contract page images
-        model: Optional model override
+        session: TracingSession for Langfuse monitoring (REQUIRED)
         
     Returns:
         List of ParsedContractPage objects sorted by page number
@@ -228,33 +283,60 @@ def parse_contract_folder(
     
     print(f"Found {len(image_files)} images in {folder_path}")
     
+    # Create span for folder parsing (REQUIRED)
+    span = session.create_span(
+        name=f"parse_folder_{Path(folder_path).name}",
+        input_data={"folder_path": folder_path, "image_count": len(image_files)},
+        metadata={"agent": "image_parser", "operation": "parse_folder"}
+    )
+    
     parsed_pages = []
     for i, image_file in enumerate(image_files, start=1):
-        page = parse_contract_image(str(image_file), page_number=i, model=AI_MODEL)
+        page = parse_contract_image(str(image_file), page_number=i, session=session)
         if page:
             parsed_pages.append(page)
+    
+    # Update span with results
+    span.update(
+        output={"pages_parsed": len(parsed_pages), "pages_failed": len(image_files) - len(parsed_pages)},
+        status_message="success" if len(parsed_pages) == len(image_files) else "partial"
+    )
+    span.end()
     
     return parsed_pages
 
 
 # CLI entry point for testing
 if __name__ == "__main__":
-    import sys
+    from tracing import create_session, flush_traces
     
-    if len(sys.argv) < 2:
-        print("Usage: python image_parser.py <image_path_or_folder>")
-        sys.exit(1)
+    input_path = "data/test_contracts/pair_1/original/page_01.png"
     
-    target = sys.argv[1]
+    # Create a tracing session
+    session = create_session(contract_id="cli_test")
     
-    if Path(target).is_dir():
-        pages = parse_contract_folder(target)
-        print(f"\nParsed {len(pages)} pages")
+    if Path(input_path).is_dir():
+        # Parse all images in folder
+        pages = parse_contract_folder(input_path, session=session)
+        print(f"\n{'='*60}")
+        print(f"Parsed {len(pages)} pages")
+        print(f"{'='*60}")
         for page in pages:
-            print(f"  Page {page.page_number}: {len(page.sections)} sections, {len(page.content)} chars")
+            print(f"\nPage {page.page_number}: {len(page.sections)} sections")
+            for section in page.sections:
+                print(f"  {section.id}. {section.title} ({len(section.clauses)} clauses)")
     else:
-        page = parse_contract_image(target)
+        # Parse single image
+        page = parse_contract_image(input_path, session=session)
         if page:
-            print(f"\nParsed page {page.page_number}")
-            print(f"Sections: {page.sections}")
-            print(f"Content preview: {page.content[:200]}...")
+            print(f"\n{'='*60}")
+            print(f"Page {page.page_number}")
+            print(f"Sections found: {len(page.sections)}")
+            print(f"{'='*60}")
+            for section in page.sections:
+                print(f"\n{section.id}. {section.title}")
+                print(f"   Clauses: {len(section.clauses)}")
+    
+    # End session and flush traces
+    session.end(status="success")
+    flush_traces()
