@@ -79,14 +79,12 @@ class TracingSession:
             "started_at": datetime.now().isoformat()
         }
         
-        # Create the root span for the session using context manager
-        self._root_context = langfuse_client.start_as_current_span(
+        # Create the root span for the session
+        self.root_span = langfuse_client.start_as_current_span(
             name=self.session_name,
             input={"contract_id": self.contract_id},
             metadata=self.metadata
         )
-        # Enter the context to get the actual span
-        self.root_span = self._root_context.__enter__()
         print(f"📊 Tracing session started: {self.session_id}")
     
     def create_span(
@@ -123,19 +121,15 @@ class TracingSession:
     
     def end(self, output: Optional[Any] = None, status: str = "success"):
         """End the tracing session."""
-        if self.root_span:
-            self.root_span.update(
-                output=output,
-                metadata={
-                    **self.metadata,
-                    "ended_at": datetime.now().isoformat(),
-                    "status": status
-                }
-            )
-            self.root_span.end()
-        # Exit the context manager
-        if hasattr(self, '_root_context') and self._root_context:
-            self._root_context.__exit__(None, None, None)
+        self.root_span.update(
+            output=output,
+            metadata={
+                **self.metadata,
+                "ended_at": datetime.now().isoformat(),
+                "status": status
+            }
+        )
+        self.root_span.end()
         # Flush to ensure all traces are sent
         langfuse_client.flush()
         print(f"📊 Tracing session ended: {self.session_id}")
@@ -235,6 +229,37 @@ def trace_llm_call(
     return LLMTraceContext()
 
 
+def trace_validation(session: TracingSession, validation_type: str):
+    """Decorator to trace validation steps."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            span = session.create_span(
+                name=f"validation_{validation_type}",
+                input_data={"validation_type": validation_type},
+                metadata={"operation": "validation"}
+            )
+            
+            try:
+                result = func(*args, **kwargs)
+                if span and hasattr(span, 'update'):
+                    span.update(
+                        output={"valid": result if isinstance(result, bool) else True},
+                        status_message="valid" if result else "invalid"
+                    )
+                return result
+            except Exception as e:
+                if span and hasattr(span, 'update'):
+                    span.update(output={"error": str(e), "valid": False}, status_message="error")
+                raise
+            finally:
+                if span and hasattr(span, 'end'):
+                    span.end()
+        
+        return wrapper
+    return decorator
+
+
 # =============================================================================
 # CONVENIENCE FUNCTIONS
 # =============================================================================
@@ -249,8 +274,9 @@ def create_session(
 
 def flush_traces():
     """Flush all pending traces to Langfuse."""
-    langfuse_client.flush()
-    print("📊 Traces flushed to Langfuse")
+    if langfuse_client:
+        langfuse_client.flush()
+        print("📊 Traces flushed to Langfuse")
 
 
 # =============================================================================
@@ -271,8 +297,9 @@ if __name__ == "__main__":
         input_data={"test": True},
         metadata={"purpose": "testing"}
     )
-    span.update(output={"result": "success"})
-    span.end()
+    if span:
+        span.update(output={"result": "success"})
+        span.end()
     
     session.end(output={"test": "completed"}, status="success")
     flush_traces()

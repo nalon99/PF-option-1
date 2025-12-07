@@ -37,6 +37,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AI_MODEL = os.getenv("OPENAI_MODEL")
 USE_OPEN_ROUTER = os.getenv("USE_OPEN_ROUTER", "false").lower() == "true"
 
+# Keep original model name for Langfuse cost tracking (e.g., "gpt-4o")
+LANGFUSE_MODEL_NAME = AI_MODEL
+
 # Initialize client
 if USE_OPEN_ROUTER:
     client = OpenAI(
@@ -155,7 +158,7 @@ def assemble_document(
     
     try:
         # Trace LLM call (REQUIRED)
-        with trace_llm_call(session, f"llm_assemble_{document_name}", AI_MODEL, "contextualization_agent") as gen:
+        with trace_llm_call(session, f"llm_assemble_{document_name}", LANGFUSE_MODEL_NAME, "contextualization_agent") as gen:
             completion = client.chat.completions.create(
                 model=AI_MODEL,
                 messages=[
@@ -330,7 +333,7 @@ def align_documents(
     
     try:
         # Trace LLM call (REQUIRED)
-        with trace_llm_call(session, "llm_align_documents", AI_MODEL, "contextualization_agent") as gen:
+        with trace_llm_call(session, "llm_align_documents", LANGFUSE_MODEL_NAME, "contextualization_agent") as gen:
             completion = client.chat.completions.create(
                 model=AI_MODEL,
                 messages=[
@@ -549,11 +552,11 @@ if __name__ == "__main__":
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     
     # Test with pair_1
-    original_path = os.path.join(project_root, "data/test_contracts/pair_1/original")
-    amended_path = os.path.join(project_root, "data/test_contracts/pair_1/amendment")
+    original_path = os.path.join(project_root, "data/test_contracts/pair_2/original")
+    amended_path = os.path.join(project_root, "data/test_contracts/pair_2/amendment")
     
     # Create tracing session
-    session = create_session(contract_id="pair_1_test")
+    session = create_session(contract_id="pair_2_test")
     
     print("Parsing original contract images...")
     original_pages = parse_contract_folder(original_path, session=session)
@@ -572,7 +575,7 @@ if __name__ == "__main__":
         
         if result:
             # Save the result for later use by the extraction_agent
-            output_path = os.path.join(project_root, "data/test_contracts/pair_1/contextualization_output.json")
+            output_path = os.path.join(project_root, "data/test_contracts/pair_2/contextualization_output.json")
             with open(output_path, "w") as f:
                 json.dump(result.model_dump(), f, indent=2)
             

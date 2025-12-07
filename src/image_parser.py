@@ -31,6 +31,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AI_MODEL = os.getenv("OPENAI_MODEL")
 USE_OPEN_ROUTER = os.getenv("USE_OPEN_ROUTER", "false").lower() == "true"
 
+# Keep original model name for Langfuse cost tracking (e.g., "gpt-4o")
+LANGFUSE_MODEL_NAME = AI_MODEL
+
 # Initialize client (same API key for both OpenAI and OpenRouter)
 if USE_OPEN_ROUTER:
     client = OpenAI(
@@ -177,7 +180,7 @@ def parse_contract_image(
     
     try:
         # Trace LLM call (REQUIRED)
-        with trace_llm_call(session, f"llm_parse_page_{page_number}", AI_MODEL, "image_parser") as gen:
+        with trace_llm_call(session, f"llm_parse_page_{page_number}", LANGFUSE_MODEL_NAME, "image_parser") as gen:
             completion = client.chat.completions.create(
                 model=AI_MODEL,
                 messages=[
