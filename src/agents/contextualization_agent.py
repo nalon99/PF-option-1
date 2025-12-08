@@ -10,6 +10,7 @@ Output is passed to Agent 2 (Extraction Agent) for change identification.
 Includes Langfuse tracing for monitoring all LLM calls.
 """
 
+import datetime
 import os
 import json
 from typing import List, Optional
@@ -153,7 +154,11 @@ def assemble_document(
     span = session.create_span(
         name=f"assemble_document_{document_name}",
         input_data={"document_name": document_name, "page_count": len(pages)},
-        metadata={"agent": "contextualization_agent", "operation": "assemble_document"}
+        metadata={
+            "session_id": getattr(session, 'session_id', None),
+            "contract_paid_id": getattr(session, 'contract_id', None),
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat()
+        }
     )
     
     try:
@@ -418,7 +423,7 @@ class ContextualizationAgent:
         self.amended_document: Optional[ParsedContractDocument] = None
         self.alignment: Optional[ContextualizationOutput] = None
     
-    def process(
+    def agent_contextualize(
         self,
         original_pages: List[ParsedContractPage],
         amended_pages: List[ParsedContractPage],
@@ -443,14 +448,18 @@ class ContextualizationAgent:
         
         # Create agent-level span (REQUIRED)
         agent_span = self.session.create_span(
-            name="contextualization_agent_process",
+            name="agent_contextualize",
             input_data={
                 "original_pages": len(original_pages),
                 "amended_pages": len(amended_pages),
                 "original_name": original_name,
                 "amended_name": amended_name
             },
-            metadata={"agent": "contextualization_agent", "operation": "full_process"}
+            metadata={
+                "session_id": getattr(self.session, 'session_id', None),
+                "contract_paid_id": getattr(self.session, 'contract_id', None),
+                "timestamp": datetime.datetime.now(datetime.UTC).isoformat()
+            }
         )
         
         try:
@@ -566,7 +575,7 @@ if __name__ == "__main__":
     
     if original_pages and amended_pages:
         agent = ContextualizationAgent(session=session)
-        result = agent.process(
+        result = agent.agent_contextualize(
             original_pages, 
             amended_pages,
             "Original",

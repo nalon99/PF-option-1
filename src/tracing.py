@@ -13,7 +13,7 @@ Custom metadata: session_id, contract_id, agent names
 
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Optional, Any, Dict
 from functools import wraps
 from dotenv import load_dotenv
@@ -71,18 +71,19 @@ class TracingSession:
         session_name: Optional[str] = None
     ):
         self.session_id = str(uuid.uuid4())
-        self.contract_id = contract_id or f"contract_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        now = datetime.now(UTC).isoformat()
+        self.contract_id = contract_id or f"contract_{now}"
         self.session_name = session_name or f"Contract Analysis - {self.contract_id}"
         self.metadata = {
             "session_id": self.session_id,
-            "contract_id": self.contract_id,
-            "started_at": datetime.now().isoformat()
+            "contract_pair_id": self.contract_id,
+            "started_at": now
         }
         
         # Create the root span for the session
         self.root_span = langfuse_client.start_as_current_span(
             name=self.session_name,
-            input={"contract_id": self.contract_id},
+            input={"contract_pair_id": self.contract_id},
             metadata=self.metadata
         )
         print(f"📊 Tracing session started: {self.session_id}")
@@ -121,15 +122,18 @@ class TracingSession:
     
     def end(self, output: Optional[Any] = None, status: str = "success"):
         """End the tracing session."""
-        self.root_span.update(
-            output=output,
-            metadata={
-                **self.metadata,
-                "ended_at": datetime.now().isoformat(),
-                "status": status
-            }
-        )
-        self.root_span.end()
+        # root_span is a context manager - check if it has update/end methods
+        if hasattr(self.root_span, 'update') and callable(getattr(self.root_span, 'update', None)):
+            self.root_span.update(
+                output=output,
+                metadata={
+                    **self.metadata,
+                    "ended_at": datetime.now().isoformat(),
+                    "status": status
+                }
+            )
+        if hasattr(self.root_span, 'end') and callable(getattr(self.root_span, 'end', None)):
+            self.root_span.end()
         # Flush to ensure all traces are sent
         langfuse_client.flush()
         print(f"📊 Tracing session ended: {self.session_id}")

@@ -11,6 +11,7 @@ Functions for:
 - Langfuse tracing integration for monitoring
 """
 
+import datetime
 import os
 import json
 import base64
@@ -170,12 +171,20 @@ def parse_contract_image(
     media_type = get_image_media_type(image_path)
     
     print(f"Sending image to LLM ({AI_MODEL})...")
-    
+    # Add a parameter to identify contract type (original/amendment)
+    contract_type = "original" if "original" in image_path.lower() else (
+        "amendment" if "amendment" in image_path.lower() else "unknown"
+    )
+    span_name = f"parse_{contract_type}_contract"
     # Create span for tracing (REQUIRED)
     span = session.create_span(
-        name=f"parse_image_page_{page_number}",
+        name=span_name,
         input_data={"image_path": str(image_path), "page_number": page_number},
-        metadata={"agent": "image_parser", "operation": "parse_image"}
+        metadata={
+            "session_id": getattr(session, 'session_id', None),
+            "contract_paid_id": getattr(session, 'contract_id', None),
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat()
+        }
     )
     
     try:
@@ -290,7 +299,11 @@ def parse_contract_folder(
     span = session.create_span(
         name=f"parse_folder_{Path(folder_path).name}",
         input_data={"folder_path": folder_path, "image_count": len(image_files)},
-        metadata={"agent": "image_parser", "operation": "parse_folder"}
+        metadata={
+            "session_id": getattr(session, 'session_id', None),
+            "contract_paid_id": getattr(session, 'contract_id', None),
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat()
+        }
     )
     
     parsed_pages = []
