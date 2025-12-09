@@ -10,9 +10,13 @@ Output is passed to Agent 2 (Extraction Agent) for change identification.
 Includes Langfuse tracing for monitoring all LLM calls.
 """
 
+import datetime
 import os
 import json
+import concurrent.futures
+import contextvars
 from typing import List, Optional
+from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 from pydantic import ValidationError
@@ -27,15 +31,19 @@ from models import (
     ContextualizationOutput,
     SectionAlignment
 )
-from tracing import TracingSession, trace_llm_call
+from tracing import TracingSession
 
-# Load environment variables
-load_dotenv(override=True)
+# Load environment variables from project root .env file
+ENV_FILE = Path(__file__).parent.parent.parent / ".env"
+load_dotenv(ENV_FILE, override=True)
 
 # Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AI_MODEL = os.getenv("OPENAI_MODEL")
 USE_OPEN_ROUTER = os.getenv("USE_OPEN_ROUTER", "false").lower() == "true"
+
+# Keep original model name for Langfuse cost tracking (e.g., "gpt-4o")
+LANGFUSE_MODEL_NAME = AI_MODEL
 
 # Initialize client
 if USE_OPEN_ROUTER:
@@ -52,52 +60,18 @@ else:
 # STEP 1: Intelligent Document Assembly
 # =============================================================================
 
-ASSEMBLY_PROMPT = """You are a legal document analysis expert. Your task is to intelligently merge multiple parsed pages into a single coherent document.
+ASSEMBLY_PROMPT = """Merge parsed contract pages into ONE coherent document.
 
-You will receive a list of parsed pages, each containing sections and clauses extracted from contract images. Your job is to:
+TASK: Detect page-spanning sections, merge split content, extract metadata.
 
-1. DETECT CONTINUATIONS: Identify sections or clauses that span multiple pages
-   - A section continues if text is cut mid-sentence
-   - A section continues if clause numbering continues (e.g., page 1 ends with 2.1, page 2 starts with 2.2)
+OUTPUT (JSON):
+{"title":"...","effective_date":"...or null","parties":["..."],"sections":[{"id":"I","title":"...","content":"preamble","clauses":[{"id":"1.1","title":"...or null","content":"..."}],"subsections":[]}]}
 
-2. MERGE INTELLIGENTLY:
-   - Combine split sentences/paragraphs
-   - Maintain proper clause ordering
-   - Preserve the complete content of each section
-
-3. IDENTIFY DOCUMENT METADATA:
-   - Extract document title from the first page
-   - Identify parties if mentioned
-   - Note effective date if present
-
-Return a JSON object with this structure:
-{
-    "title": "<document title>",
-    "effective_date": "<date if found, null otherwise>",
-    "parties": ["<party 1>", "<party 2>"],
-    "sections": [
-        {
-            "id": "<section id>",
-            "title": "<section title>",
-            "content": "<preamble if any>",
-            "clauses": [
-                {
-                    "id": "<clause id>",
-                    "title": "<clause title or null>",
-                    "content": "<complete clause content>"
-                }
-            ],
-            "subsections": []
-        }
-    ]
-}
-
-Rules:
-- Merge content from the same section across pages
-- Preserve exact wording (don't paraphrase)
-- Maintain numerical/hierarchical ordering
-- If content is unclear, keep it as-is with the original text
-- The pipe character "|" represents unrecognized characters from OCR - preserve them as-is
+RULES:
+- Merge same section across pages (detect mid-sentence cuts, continuing clause numbers)
+- Preserve EXACT wording - no paraphrasing
+- Keep "|" characters as-is (OCR artifacts)
+- Extract title from first page, parties if mentioned
 """
 
 
@@ -146,41 +120,46 @@ def assemble_document(
     
     print(f"📄 Assembling {len(pages)} pages into document...")
     
-    # Create span for tracing (REQUIRED)
-    span = session.create_span(
+    # Create generation for LLM call tracing (tracks model, tokens, cost)
+    span = session.create_generation(
         name=f"assemble_document_{document_name}",
+        model=LANGFUSE_MODEL_NAME,
         input_data={"document_name": document_name, "page_count": len(pages)},
-        metadata={"agent": "contextualization_agent", "operation": "assemble_document"}
+        metadata={
+            "session_id": getattr(session, 'session_id', None),
+            "contract_paid_id": getattr(session, 'contract_id', None),
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat()
+        }
     )
     
     try:
         # Trace LLM call (REQUIRED)
-        with trace_llm_call(session, f"llm_assemble_{document_name}", AI_MODEL, "contextualization_agent") as gen:
-            completion = client.chat.completions.create(
-                model=AI_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": ASSEMBLY_PROMPT
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Merge these {len(pages)} pages into a single coherent document named '{document_name}':\n\n{json.dumps(pages_data, indent=2)}"
-                    }
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.0
+        # Removed trace_llm_call - using span instead
+        completion = client.chat.completions.create(
+            model=AI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": ASSEMBLY_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": f"Merge {len(pages)} pages into '{document_name}':\n{json.dumps(pages_data, separators=(',',':'))}"
+                }
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0
+        )
+        
+        if hasattr(completion, 'usage') and completion.usage:
+            span.update(
+                output=completion.choices[0].message.content[:500],
+                usage={
+                    "input": completion.usage.prompt_tokens,
+                    "output": completion.usage.completion_tokens,
+                    "total": completion.usage.total_tokens
+                }
             )
-            
-            if hasattr(completion, 'usage') and completion.usage:
-                gen.update(
-                    output=completion.choices[0].message.content[:500],
-                    usage={
-                        "input": completion.usage.prompt_tokens,
-                        "output": completion.usage.completion_tokens,
-                        "total": completion.usage.total_tokens
-                    }
-                )
         
         response_content = completion.choices[0].message.content
         parsed_json = json.loads(response_content)
@@ -316,9 +295,10 @@ def align_documents(
         ]
     }
     
-    # Create span for tracing (REQUIRED)
-    span = session.create_span(
+    # Create generation for LLM call tracing (tracks model, tokens, cost)
+    span = session.create_generation(
         name="align_documents",
+        model=LANGFUSE_MODEL_NAME,
         input_data={
             "original_title": original.title,
             "amended_title": amended.title,
@@ -330,32 +310,32 @@ def align_documents(
     
     try:
         # Trace LLM call (REQUIRED)
-        with trace_llm_call(session, "llm_align_documents", AI_MODEL, "contextualization_agent") as gen:
-            completion = client.chat.completions.create(
-                model=AI_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": ALIGNMENT_PROMPT
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Align these two documents:\n\nORIGINAL:\n{json.dumps(original_data, indent=2)}\n\nAMENDED:\n{json.dumps(amended_data, indent=2)}"
-                    }
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.0
+        # Removed trace_llm_call - using span instead
+        completion = client.chat.completions.create(
+            model=AI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": ALIGNMENT_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": f"ORIGINAL:\n{json.dumps(original_data, separators=(',',':'))}\n\nAMENDED:\n{json.dumps(amended_data, separators=(',',':'))}"
+                }
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0
+        )
+        
+        if hasattr(completion, 'usage') and completion.usage:
+            span.update(
+                output=completion.choices[0].message.content[:500],
+                usage={
+                    "input": completion.usage.prompt_tokens,
+                    "output": completion.usage.completion_tokens,
+                    "total": completion.usage.total_tokens
+                }
             )
-            
-            if hasattr(completion, 'usage') and completion.usage:
-                gen.update(
-                    output=completion.choices[0].message.content[:500],
-                    usage={
-                        "input": completion.usage.prompt_tokens,
-                        "output": completion.usage.completion_tokens,
-                        "total": completion.usage.total_tokens
-                    }
-                )
         
         response_content = completion.choices[0].message.content
         parsed_json = json.loads(response_content)
@@ -415,7 +395,7 @@ class ContextualizationAgent:
         self.amended_document: Optional[ParsedContractDocument] = None
         self.alignment: Optional[ContextualizationOutput] = None
     
-    def process(
+    def agent_contextualize(
         self,
         original_pages: List[ParsedContractPage],
         amended_pages: List[ParsedContractPage],
@@ -440,33 +420,49 @@ class ContextualizationAgent:
         
         # Create agent-level span (REQUIRED)
         agent_span = self.session.create_span(
-            name="contextualization_agent_process",
+            name="agent_contextualize",
             input_data={
                 "original_pages": len(original_pages),
                 "amended_pages": len(amended_pages),
                 "original_name": original_name,
                 "amended_name": amended_name
             },
-            metadata={"agent": "contextualization_agent", "operation": "full_process"}
+            metadata={
+                "session_id": getattr(self.session, 'session_id', None),
+                "contract_paid_id": getattr(self.session, 'contract_id', None),
+                "timestamp": datetime.datetime.now(datetime.UTC).isoformat()
+            }
         )
         
         try:
-            # Step 1: Assemble documents
-            print("\n📋 STEP 1: Document Assembly")
+            # Step 1: Assemble documents (PARALLEL for ~8s speedup)
+            print("\n📋 STEP 2.1: Document Assembly (parallel)")
             print("-"*40)
             
-            self.original_document = assemble_document(original_pages, original_name, self.session)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                # Copy context separately for each thread to propagate Langfuse hierarchy
+                ctx_original = contextvars.copy_context()
+                ctx_amended = contextvars.copy_context()
+                future_original = executor.submit(
+                    ctx_original.run, assemble_document, original_pages, original_name, self.session
+                )
+                future_amended = executor.submit(
+                    ctx_amended.run, assemble_document, amended_pages, amended_name, self.session
+                )
+                
+                self.original_document = future_original.result()
+                self.amended_document = future_amended.result()
+            
             if not self.original_document:
                 print("❌ Failed to assemble original document")
                 return None
             
-            self.amended_document = assemble_document(amended_pages, amended_name, self.session)
             if not self.amended_document:
                 print("❌ Failed to assemble amended document")
                 return None
             
             # Step 2: Align documents
-            print("\n🔗 STEP 2: Document Alignment")
+            print("\n🔗 STEP 2.2: Document Alignment")
             print("-"*40)
             
             self.alignment = align_documents(self.original_document, self.amended_document, self.session)
@@ -540,49 +536,48 @@ class ContextualizationAgent:
 # CLI Entry Point for Testing
 # =============================================================================
 
-if __name__ == "__main__":
-    from image_parser import parse_contract_folder
-    from tracing import create_session, flush_traces
+# if __name__ == "__main__":
+#     from image_parser import parse_contract_folder
     
-    # Get project root (two levels up from this file)
-    import os
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+#     # Get project root (two levels up from this file)
+#     import os
+#     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     
-    # Test with pair_1
-    original_path = os.path.join(project_root, "data/test_contracts/pair_1/original")
-    amended_path = os.path.join(project_root, "data/test_contracts/pair_1/amendment")
+#     # Test with pair_1
+#     original_path = os.path.join(project_root, "data/test_contracts/pair_2/original")
+#     amended_path = os.path.join(project_root, "data/test_contracts/pair_2/amendment")
     
-    # Create tracing session
-    session = create_session(contract_id="pair_1_test")
+#     # Create tracing session
+#     session = create_session(contract_id="pair_2_test")
     
-    print("Parsing original contract images...")
-    original_pages = parse_contract_folder(original_path, session=session)
+#     print("Parsing original contract images...")
+#     original_pages = parse_contract_folder(original_path, session=session)
     
-    print("\nParsing amended contract images...")
-    amended_pages = parse_contract_folder(amended_path, session=session)
+#     print("\nParsing amended contract images...")
+#     amended_pages = parse_contract_folder(amended_path, session=session)
     
-    if original_pages and amended_pages:
-        agent = ContextualizationAgent(session=session)
-        result = agent.process(
-            original_pages, 
-            amended_pages,
-            "Original",
-            "Amended"
-        )
+#     if original_pages and amended_pages:
+#         agent = ContextualizationAgent(session=session)
+#         result = agent.agent_contextualize(
+#             original_pages, 
+#             amended_pages,
+#             "Original",
+#             "Amended"
+#         )
         
-        if result:
-            # Save the result for later use by the extraction_agent
-            output_path = os.path.join(project_root, "data/test_contracts/pair_1/contextualization_output.json")
-            with open(output_path, "w") as f:
-                json.dump(result.model_dump(), f, indent=2)
+#         if result:
+#             # Save the result for later use by the extraction_agent
+#             output_path = os.path.join(project_root, "data/test_contracts/pair_2/contextualization_output.json")
+#             with open(output_path, "w") as f:
+#                 json.dump(result.model_dump(), f, indent=2)
             
-            print("\n" + "="*60)
-            print("RESULTS")
-            print("="*60)
-            print(f"\nSections with changes:")
-            for section in agent.get_changed_sections():
-                print(f"  - {section.section_id}: {section.section_title}")
+#             print("\n" + "="*60)
+#             print("RESULTS")
+#             print("="*60)
+#             print(f"\nSections with changes:")
+#             for section in agent.get_changed_sections():
+#                 print(f"  - {section.section_id}: {section.section_title}")
     
-    # End session and flush traces
-    session.end(output={"status": "completed"}, status="success")
-    flush_traces()
+#     # End session and flush traces
+#     session.end(output={"status": "completed"}, status="success")
+#     flush_traces()

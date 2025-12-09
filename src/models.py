@@ -58,6 +58,14 @@ class Section(BaseModel):
         default_factory=list,
         description="Nested subsections if any"
     )
+    
+    @field_validator('id', mode='before')
+    @classmethod
+    def handle_null_id(cls, v):
+        """Assign default ID if null/empty from LLM."""
+        if v is None or v == "":
+            return "SECTION_UNKNOWN"
+        return v
 
 
 class ParsedContractDocument(BaseModel):
