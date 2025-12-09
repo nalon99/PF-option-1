@@ -29,11 +29,14 @@ Contract folder structure:
         └── amendment/
 """
 
+import datetime
 import os
 import sys
 import json
 from pathlib import Path
 from typing import Optional, Tuple, List
+
+import langfuse
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -46,7 +49,7 @@ from models import (
 from image_parser import parse_contract_folder
 from agents.contextualization_agent import ContextualizationAgent
 from agents.extraction_agent import ExtractionAgent
-from tracing import create_session, TracingSession, flush_traces
+from tracing import TracingSession
 
 
 # =============================================================================
@@ -142,15 +145,15 @@ def analyze_contract_amendment(
     Raises:
         ValueError: If any step fails
     """
-    # Create main workflow span
-    workflow_span = session.create_span(
-        name="contract_analysis_workflow",
-        input_data={
-            "original_folder": original_folder,
-            "amendment_folder": amendment_folder
-        },
-        metadata={"operation": "full_workflow"}
-    )
+    # # Create main workflow span
+    # workflow_span = session.create_span(
+    #     name="contract_analysis_workflow",
+    #     input_data={
+    #         "original_folder": original_folder,
+    #         "amendment_folder": amendment_folder
+    #     },
+    #     metadata={"operation": "full_workflow"}
+    # )
     
     try:
         # =================================================================
@@ -246,10 +249,10 @@ def analyze_contract_amendment(
         }
         
         all_valid = all(validations.values())
-        validation_span.update(
-            output={"validations": validations, "all_valid": all_valid},
-            status_message="valid" if all_valid else "invalid"
-        )
+        if all_valid:
+            validation_span.update(output={"validations": validations, "all_valid": all_valid})
+        else:
+            validation_span.error(f"Validation failed: {validations}")
         validation_span.end()
         
         if not all_valid:
@@ -257,25 +260,20 @@ def analyze_contract_amendment(
         
         print("✅ All validations passed")
         
-        # Update workflow span
-        workflow_span.update(
-            output={
-                "success": True,
-                "sections_changed": len(extraction_result.sections_changed),
-                "topics_touched": len(extraction_result.topics_touched)
-            },
-            status_message="success"
-        )
-        workflow_span.end()
+        # Mark trace as SUCCESS
+        session.mark_success({
+            "success": True,
+            "sections_changed": len(extraction_result.sections_changed),
+            "topics_touched": len(extraction_result.topics_touched)
+        })
+        session.end()
         
         return extraction_result
         
     except Exception as e:
-        workflow_span.update(
-            output={"error": str(e), "success": False},
-            status_message="error"
-        )
-        workflow_span.end()
+        # Mark trace as ERROR (clearly visible in Langfuse UI)
+        session.mark_error(str(e))
+        session.end()
         raise
 
 
@@ -318,12 +316,12 @@ def process_contract_pair(
         return None
     print(f"✅ Amendment folder: {msg}")
     
-    # Create tracing session
-    session = create_session(
+    
+    session = TracingSession(
         contract_id=pair_name,
         session_name=f"Contract Analysis - {pair_name}"
     )
-    
+   
     try:
         # Run analysis
         result = analyze_contract_amendment(
@@ -366,13 +364,13 @@ def process_contract_pair(
         print("="*70 + "\n")
         
         # End session successfully
-        session.end(
+        session.root_span.update(
             output={
                 "status": "success",
                 "sections_changed": len(result.sections_changed),
                 "topics_touched": len(result.topics_touched)
             },
-            status="success"
+            status_message="success"
         )
         
         return result
@@ -383,14 +381,14 @@ def process_contract_pair(
         traceback.print_exc()
         
         # End session with error
-        session.end(
+        session.root_span.update(
             output={"status": "error", "error": str(e)},
-            status="error"
+            status_message="error"
         )
         return None
     
     finally:
-        flush_traces()
+        session.end()
 
 
 # =============================================================================

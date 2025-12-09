@@ -22,10 +22,11 @@ from dotenv import load_dotenv
 from pydantic import ValidationError
 
 from models import ParsedContractPage
-from tracing import TracingSession, trace_llm_call
+from tracing import TracingSession
 
-# Load environment variables
-load_dotenv(override=True)
+# Load environment variables from project root .env file
+ENV_FILE = Path(__file__).parent.parent / ".env"
+load_dotenv(ENV_FILE, override=True)
 
 # Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -176,9 +177,10 @@ def parse_contract_image(
         "amendment" if "amendment" in image_path.lower() else "unknown"
     )
     span_name = f"parse_{contract_type}_contract"
-    # Create span for tracing (REQUIRED)
-    span = session.create_span(
+    # Create generation for LLM call tracing (tracks model, tokens, cost)
+    span = session.create_generation(
         name=span_name,
+        model=LANGFUSE_MODEL_NAME,
         input_data={"image_path": str(image_path), "page_number": page_number},
         metadata={
             "session_id": getattr(session, 'session_id', None),
@@ -188,45 +190,43 @@ def parse_contract_image(
     )
     
     try:
-        # Trace LLM call (REQUIRED)
-        with trace_llm_call(session, f"llm_parse_page_{page_number}", LANGFUSE_MODEL_NAME, "image_parser") as gen:
-            completion = client.chat.completions.create(
-                model=AI_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": SYSTEM_PROMPT
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{media_type};base64,{base64_img}"
-                                }
-                            },
-                            {
-                                "type": "text",
-                                "text": f"Extract the hierarchical content from this contract page (page {page_number})."
+        completion = client.chat.completions.create(
+            model=AI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{media_type};base64,{base64_img}"
                             }
-                        ]
-                    }
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.0
+                        },
+                        {
+                            "type": "text",
+                            "text": f"Extract the hierarchical content from this contract page (page {page_number})."
+                        }
+                    ]
+                }
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0
+        )
+        
+        # Update trace with usage info
+        if hasattr(completion, 'usage') and completion.usage:
+            span.update(
+                output=completion.choices[0].message.content[:500],  # Truncate for trace
+                usage={
+                    "input": completion.usage.prompt_tokens,
+                    "output": completion.usage.completion_tokens,
+                    "total": completion.usage.total_tokens
+                }
             )
-            
-            # Update trace with usage info
-            if hasattr(completion, 'usage') and completion.usage:
-                gen.update(
-                    output=completion.choices[0].message.content[:500],  # Truncate for trace
-                    usage={
-                        "input": completion.usage.prompt_tokens,
-                        "output": completion.usage.completion_tokens,
-                        "total": completion.usage.total_tokens
-                    }
-                )
         
         # Parse the response
         response_content = completion.choices[0].message.content

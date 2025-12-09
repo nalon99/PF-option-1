@@ -14,6 +14,7 @@ Includes Langfuse tracing for monitoring all LLM calls.
 import os
 import json
 from typing import Optional
+from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
 from pydantic import ValidationError
@@ -25,15 +26,19 @@ from models import (
     ContextualizationOutput,
     ContractAnalysisResult
 )
-from tracing import TracingSession, trace_llm_call
+from tracing import SpanWrapper, TracingSession
 
-# Load environment variables
-load_dotenv(override=True)
+# Load environment variables from project root .env file
+ENV_FILE = Path(__file__).parent.parent.parent / ".env"
+load_dotenv(ENV_FILE, override=True)
 
 # Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AI_MODEL = os.getenv("OPENAI_MODEL")
 USE_OPEN_ROUTER = os.getenv("USE_OPEN_ROUTER", "false").lower() == "true"
+
+# Keep original model name for Langfuse cost tracking (e.g., "gpt-4o")
+LANGFUSE_MODEL_NAME = AI_MODEL
 
 # Initialize client
 if USE_OPEN_ROUTER:
@@ -52,7 +57,7 @@ else:
 
 EXTRACTION_PROMPT = """You are a legal document analyst specializing in contract amendments. Your task is to analyze the aligned sections between an original contract and its amendment, then extract and summarize all changes.
 
-You will receive aligned sections from both documents. For each section marked with "has_changes": true, carefully analyze the differences.
+You will receive ONLY the sections that contain changes (pre-filtered). Analyze the differences between original_content and amended_content for EACH section provided.
 
 Your analysis should produce:
 
@@ -130,9 +135,10 @@ class ExtractionAgent:
         if not self.session:
             raise ValueError("Tracing session is required for ExtractionAgent")
         
-        # Create span for this operation
-        span = self.session.create_span(
+        # Create generation for LLM call tracing (tracks model, tokens, cost)
+        span = self.session.create_generation(
             name="agent_extract_changes",
+            model=LANGFUSE_MODEL_NAME,
             input_data={
                 "original_title": contextualization_output.original_title,
                 "amended_title": contextualization_output.amended_title,
@@ -155,24 +161,30 @@ class ExtractionAgent:
                 span.end()
                 raise ValueError("No changes detected between documents")
             
-            # Prepare input for LLM
+            # Prepare input for LLM - ONLY send changed sections (optimization)
+            changed_sections = [
+                {
+                    "section_id": s.section_id,
+                    "section_title": s.section_title,
+                    "original_content": s.original_content,
+                    "amended_content": s.amended_content
+                }
+                for s in contextualization_output.aligned_sections
+                if s.has_changes  # Filter to only changed sections
+            ]
+            
+            if not changed_sections:
+                raise ValueError("No changes detected between documents")
+            
             input_data = {
                 "original_document": contextualization_output.original_title,
                 "amended_document": contextualization_output.amended_title,
-                "aligned_sections": [
-                    {
-                        "section_id": s.section_id,
-                        "section_title": s.section_title,
-                        "original_content": s.original_content,
-                        "amended_content": s.amended_content,
-                        "has_changes": s.has_changes
-                    }
-                    for s in contextualization_output.aligned_sections
-                ]
+                "changed_sections_count": len(changed_sections),
+                "aligned_sections": changed_sections
             }
             
             # Call LLM for extraction
-            result = self._call_extraction_llm(input_data)
+            result = self._call_extraction_llm(input_data, span)
             
             span.update(output={
                 "sections_changed": result.sections_changed,
@@ -184,11 +196,11 @@ class ExtractionAgent:
             return result
             
         except Exception as e:
-            span.update(output={"error": str(e)}, status_message="error")
+            span.error(str(e))  # Mark as ERROR in Langfuse
             span.end()
             raise
     
-    def _call_extraction_llm(self, input_data: dict) -> ContractAnalysisResult:
+    def _call_extraction_llm(self, input_data: dict, span: SpanWrapper) -> ContractAnalysisResult:
         """
         Call LLM to extract changes from aligned sections.
         
@@ -201,39 +213,39 @@ class ExtractionAgent:
         input_json = json.dumps(input_data, indent=2)
         
         # Trace LLM call
-        with trace_llm_call(
-            self.session,
-            "llm_agent_extract_changes",
-            AI_MODEL,
-            "extraction_agent"
-        ) as gen:
-            try:
-                completion = client.chat.completions.create(
-                    model=AI_MODEL,
-                    messages=[
-                        {"role": "system", "content": EXTRACTION_PROMPT},
-                        {"role": "user", "content": f"Analyze these aligned contract sections and extract all changes:\n\n{input_json}"}
-                    ],
-                    temperature=0.0,
-                    max_tokens=4000,
-                    response_format={"type": "json_object"}
-                )
-                
-                response_content = completion.choices[0].message.content
-                
-                # Update trace with usage
-                gen.update(
-                    output=response_content,
-                    usage={
-                        "input": completion.usage.prompt_tokens,
-                        "output": completion.usage.completion_tokens,
-                        "total": completion.usage.total_tokens
-                    }
-                )
-                
-            except Exception as e:
-                gen.update(output={"error": str(e)})
-                raise ValueError(f"LLM call failed: {str(e)}")
+        # with trace_llm_call(
+        #     self.session,
+        #     "llm_agent_extract_changes",
+        #     AI_MODEL,
+        #     "extraction_agent"
+        # ) as gen:
+        try:
+            completion = client.chat.completions.create(
+                model=AI_MODEL,
+                messages=[
+                    {"role": "system", "content": EXTRACTION_PROMPT},
+                    {"role": "user", "content": f"Analyze these aligned contract sections and extract all changes:\n\n{input_json}"}
+                ],
+                temperature=0.0,
+                max_tokens=4000,
+                response_format={"type": "json_object"}
+            )
+            
+            response_content = completion.choices[0].message.content
+            
+            # Update trace with usage
+            span.update(
+                output=response_content,
+                usage={
+                    "input": completion.usage.prompt_tokens,
+                    "output": completion.usage.completion_tokens,
+                    "total": completion.usage.total_tokens
+                }
+            )
+            
+        except Exception as e:
+            span.error(f"LLM call failed: {str(e)}")
+            raise ValueError(f"LLM call failed: {str(e)}")
         
         # Parse and validate response
         return self._parse_and_validate(response_content)
@@ -285,7 +297,7 @@ class ExtractionAgent:
             return result
             
         except Exception as e:
-            span.update(output={"error": str(e), "valid": False}, status_message="error")
+            span.error(str(e), output={"error": str(e), "valid": False})
             span.end()
             raise
 

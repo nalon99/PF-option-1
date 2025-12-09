@@ -1,12 +1,7 @@
 """
-Langfuse Tracing Module
+Langfuse Tracing Module (Simplified)
 
-Provides tracing capabilities for the contract analysis workflow:
-- Image parsing traces
-- Agent 1 (Contextualization) execution traces
-- Agent 2 (Extraction) execution traces
-- Validation step traces
-
+Provides tracing capabilities for the contract analysis workflow.
 Each trace captures: input, output, latency, tokens, cost
 Custom metadata: session_id, contract_id, agent names
 """
@@ -15,11 +10,12 @@ import os
 import uuid
 from datetime import datetime, UTC
 from typing import Optional, Any, Dict
-from functools import wraps
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv(override=True)
+# Load environment variables from project root .env file
+ENV_FILE = Path(__file__).parent.parent / ".env"
+load_dotenv(ENV_FILE, override=True)
 
 # Langfuse imports
 from langfuse import Langfuse
@@ -61,14 +57,14 @@ langfuse_client = get_langfuse_client()
 class TracingSession:
     """
     Manages a tracing session for a complete contract analysis workflow.
-    
-    Uses Langfuse's context-based approach with start_as_current_span.
+    Uses Langfuse's start_as_current_span for the root span.
     """
     
     def __init__(
         self,
         contract_id: Optional[str] = None,
-        session_name: Optional[str] = None
+        session_name: Optional[str] = None,
+        input_data: Optional[Dict] = None
     ):
         self.session_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
@@ -80,8 +76,16 @@ class TracingSession:
             "started_at": now
         }
         
-        # Create the root span for the session
-        self.root_span = langfuse_client.start_as_current_span(
+        # Create root span - store context manager to keep it open
+        self._root_context = langfuse_client.start_as_current_span(
+            name="session_root",
+            metadata=self.metadata
+        )
+        # Enter the context to get the span object
+        self.root_span = self._root_context.__enter__()
+        
+        # Update trace with name and metadata
+        self.root_span.update_trace(
             name=self.session_name,
             input={"contract_pair_id": self.contract_id},
             metadata=self.metadata
@@ -110,7 +114,7 @@ class TracingSession:
         input_data: Optional[Any] = None,
         metadata: Optional[Dict] = None
     ):
-        """Create a new generation (LLM call) within this trace."""
+        """Create a new generation (LLM call) - tracks model, tokens, cost."""
         gen_metadata = {**self.metadata, **(metadata or {})}
         generation = langfuse_client.start_generation(
             name=name,
@@ -120,21 +124,29 @@ class TracingSession:
         )
         return GenerationWrapper(generation)
     
-    def end(self, output: Optional[Any] = None, status: str = "success"):
+    def mark_error(self, error_message: str):
+        """Mark the trace as ERROR for clear visibility in Langfuse UI."""
+        # Update trace output/metadata
+        self.root_span.update_trace(
+            output={"error": error_message, "success": False},
+            metadata={**self.metadata, "status": "error", "ended_at": datetime.now(UTC).isoformat()}
+        )
+        # Set level on the span (level not supported on update_trace)
+        self.root_span.update(level="ERROR")
+        print(f"❌ Trace marked as ERROR: {error_message[:50]}...")
+    
+    def mark_success(self, output: Optional[Dict] = None):
+        """Mark the trace as successful."""
+        self.root_span.update_trace(
+            output=output or {"success": True},
+            metadata={**self.metadata, "status": "success", "ended_at": datetime.now(UTC).isoformat()}
+        )
+    
+    def end(self):
         """End the tracing session."""
-        # root_span is a context manager - check if it has update/end methods
-        if hasattr(self.root_span, 'update') and callable(getattr(self.root_span, 'update', None)):
-            self.root_span.update(
-                output=output,
-                metadata={
-                    **self.metadata,
-                    "ended_at": datetime.now().isoformat(),
-                    "status": status
-                }
-            )
-        if hasattr(self.root_span, 'end') and callable(getattr(self.root_span, 'end', None)):
-            self.root_span.end()
-        # Flush to ensure all traces are sent
+        # Exit the context manager properly
+        if hasattr(self, '_root_context') and self._root_context:
+            self._root_context.__exit__(None, None, None)
         langfuse_client.flush()
         print(f"📊 Tracing session ended: {self.session_id}")
 
@@ -145,15 +157,31 @@ class SpanWrapper:
     def __init__(self, span):
         self.span = span
     
-    def update(self, output=None, status_message=None, **kwargs):
-        """Update span with output and metadata."""
+    def update(self, output=None, status_message=None, level=None, **kwargs):
+        """Update span with output and metadata.
+        
+        Args:
+            output: Output data
+            status_message: Status message
+            level: "DEBUG", "DEFAULT", "WARNING", or "ERROR" - visible in Langfuse UI
+        """
         update_kwargs = {}
         if output is not None:
             update_kwargs['output'] = output
         if status_message is not None:
             update_kwargs['status_message'] = status_message
+        if level is not None:
+            update_kwargs['level'] = level
         update_kwargs.update(kwargs)
         self.span.update(**update_kwargs)
+    
+    def error(self, error_message: str, output=None):
+        """Mark span as ERROR for clear visibility in Langfuse."""
+        self.update(
+            output=output or {"error": error_message},
+            status_message=error_message,
+            level="ERROR"
+        )
     
     def end(self):
         """End the span."""
@@ -161,107 +189,48 @@ class SpanWrapper:
 
 
 class GenerationWrapper:
-    """Wrapper for Langfuse generation with simplified interface."""
+    """Wrapper for Langfuse generation (LLM call) with token/cost tracking."""
     
     def __init__(self, generation):
         self.generation = generation
     
-    def update(self, output=None, usage=None, **kwargs):
-        """Update generation with output and usage info."""
+    def update(self, output=None, usage=None, level=None, **kwargs):
+        """Update generation with output and usage (tokens).
+        
+        Args:
+            output: Output data
+            usage: Token usage dict {"input": X, "output": Y, "total": Z}
+            level: "DEBUG", "DEFAULT", "WARNING", or "ERROR" - visible in Langfuse UI
+        """
         update_kwargs = {}
         if output is not None:
             update_kwargs['output'] = output
         if usage is not None:
-            # Convert usage dict to usage_details format
+            # Langfuse expects usage_details for token tracking
             update_kwargs['usage_details'] = usage
+            # usage keys must be as the following example shown below
+            # update_kwargs['usage_details'] = {
+            #     "input": usage.get("input", usage.get("prompt_tokens", 0)),
+            #     "output": usage.get("output", usage.get("completion_tokens", 0)),
+            #     "total": usage.get("total", usage.get("total_tokens", 0)),
+            #     "unit": "TOKENS"
+            # }
+        if level is not None:
+            update_kwargs['level'] = level
         update_kwargs.update(kwargs)
         self.generation.update(**update_kwargs)
+    
+    def error(self, error_message: str, output=None):
+        """Mark generation as ERROR for clear visibility in Langfuse."""
+        self.update(
+            output=output or {"error": error_message},
+            status_message=error_message,
+            level="ERROR"
+        )
     
     def end(self):
         """End the generation."""
         self.generation.end()
-
-
-# =============================================================================
-# TRACING CONTEXT MANAGER
-# =============================================================================
-
-def trace_llm_call(
-    session: TracingSession,
-    name: str,
-    model: str,
-    agent_name: str = "unknown"
-):
-    """
-    Context manager for tracing LLM calls with token/cost tracking.
-    
-    Usage:
-        with trace_llm_call(session, "parse_page", "gpt-4o", "image_parser") as gen:
-            response = client.chat.completions.create(...)
-            gen.update(output=response.choices[0].message.content, 
-                      usage={"input": response.usage.prompt_tokens, 
-                             "output": response.usage.completion_tokens})
-    """
-    class LLMTraceContext:
-        def __init__(self):
-            self.generation = session.create_generation(
-                name=name,
-                model=model,
-                metadata={"agent": agent_name}
-            )
-            self.start_time = datetime.now()
-        
-        def __enter__(self):
-            return self
-        
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            latency_ms = (datetime.now() - self.start_time).total_seconds() * 1000
-            self.generation.update(
-                metadata={"latency_ms": latency_ms}
-            )
-            self.generation.end()
-        
-        def update(self, output=None, usage=None, **kwargs):
-            update_data = {}
-            if output:
-                update_data['output'] = output
-            if usage:
-                update_data['usage'] = usage
-            update_data.update(kwargs)
-            self.generation.update(**update_data)
-    
-    return LLMTraceContext()
-
-
-def trace_validation(session: TracingSession, validation_type: str):
-    """Decorator to trace validation steps."""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            span = session.create_span(
-                name=f"validation_{validation_type}",
-                input_data={"validation_type": validation_type},
-                metadata={"operation": "validation"}
-            )
-            
-            try:
-                result = func(*args, **kwargs)
-                if span and hasattr(span, 'update'):
-                    span.update(
-                        output={"valid": result if isinstance(result, bool) else True},
-                        status_message="valid" if result else "invalid"
-                    )
-                return result
-            except Exception as e:
-                if span and hasattr(span, 'update'):
-                    span.update(output={"error": str(e), "valid": False}, status_message="error")
-                raise
-            finally:
-                if span and hasattr(span, 'end'):
-                    span.end()
-        
-        return wrapper
-    return decorator
 
 
 # =============================================================================
@@ -270,10 +239,11 @@ def trace_validation(session: TracingSession, validation_type: str):
 
 def create_session(
     contract_id: Optional[str] = None,
-    session_name: Optional[str] = None
+    session_name: Optional[str] = None,
+    input_data: Optional[Dict] = None
 ) -> TracingSession:
     """Create a new tracing session."""
-    return TracingSession(contract_id=contract_id, session_name=session_name)
+    return TracingSession(contract_id=contract_id, session_name=session_name, input_data=input_data)
 
 
 def flush_traces():
@@ -283,29 +253,22 @@ def flush_traces():
         print("📊 Traces flushed to Langfuse")
 
 
-# =============================================================================
-# TESTING
-# =============================================================================
-
 if __name__ == "__main__":
-    # Test tracing setup
-    print("\n" + "="*60)
-    print("Testing Langfuse Tracing")
-    print("="*60)
+    session = create_session(contract_id="test_contract_id", session_name="test_session_name", input_data={"test_input_data": "empty now"})
     
-    session = create_session(contract_id="test_001")
-    
-    # Simulate a span
-    span = session.create_span(
-        name="test_operation",
-        input_data={"test": True},
-        metadata={"purpose": "testing"}
-    )
-    if span:
-        span.update(output={"result": "success"})
-        span.end()
-    
-    session.end(output={"test": "completed"}, status="success")
+    generation = session.create_generation(name="test_generation", model="test_model", input_data={"test_input_generation": "test_data_generation"})
+    generation.update(output="test_output", usage={"test_usage": "test_usage_data"})
+    generation.end()
+
+    span = session.create_span(name="test_span", input_data={"test_input_span": "test_data_span"})
+    span.update(output="test_output_span", status_message="test_status_message")
+    span.end()
+
+    session.end()
     flush_traces()
     
-    print("\n✅ Tracing test complete")
+    print(f"Session: {session}")
+    print(f"Generation: {generation}")
+    print(f"Span: {span}")
+    print(f"Langfuse client: {langfuse_client}")
+    # print(f"Langfuse client configuration: {langfuse_client.config}")
