@@ -5,7 +5,6 @@
     "2.3. Termination for Convenience",
     "3.1. Fees",
     "3.2. Late Payment",
-    "3.3. Expenses",
     "6.2. Cap on Liability"
   ],
   "topics_touched": [
@@ -14,7 +13,6 @@
     "Termination Conditions",
     "Payment Terms",
     "Payment Terms",
-    "Expense Reimbursement",
     "Liability Cap"
   ],
   "summary_of_the_change": [
@@ -23,7 +21,6 @@
     "The notice period for termination for convenience was increased from 60 days to 90 days (Sec. 2.3).",
     "The fixed monthly compensation rate was increased from 15000 USD to 18000 USD (Sec. 3.1).",
     "The interest rate on late payments was increased from 1.5% per month to 2.0% per month (Sec. 3.2).",
-    "The threshold for requiring prior written authorization for expenses was changed from 500 to $500 (Sec. 3.3).",
     "The liability cap was changed from three (3) months to six (6) months of fees paid (Sec. 6.2)."
   ]
 }

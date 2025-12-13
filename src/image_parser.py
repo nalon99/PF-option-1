@@ -347,30 +347,35 @@ if __name__ == "__main__":
         # Create a tracing session
         session = create_session(contract_id="cli_test")
         
-        if Path(input_path).is_dir():
-            # Parse all images in folder (parallel)
-            pages = await parse_contract_folder(input_path, session=session)
-            print(f"\n{'='*60}")
-            print(f"Parsed {len(pages)} pages")
-            print(f"{'='*60}")
-            for page in pages:
-                print(f"\nPage {page.page_number}: {len(page.sections)} sections")
-                for section in page.sections:
-                    print(f"  {section.id}. {section.title} ({len(section.clauses)} clauses)")
-        else:
-            # Parse single image
-            page = await parse_contract_image(input_path, page_number=1, session=session)
-            if page:
+        try:
+            if Path(input_path).is_dir():
+                # Parse all images in folder (parallel)
+                pages = await parse_contract_folder(input_path, session=session)
                 print(f"\n{'='*60}")
-                print(f"Page {page.page_number}")
-                print(f"Sections found: {len(page.sections)}")
+                print(f"Parsed {len(pages)} pages")
                 print(f"{'='*60}")
-                for section in page.sections:
-                    print(f"\n{section.id}. {section.title}")
-                    print(f"   Clauses: {len(section.clauses)}")
-        
-        # End session and flush traces
-        session.end()
-        flush_traces()
+                for page in pages:
+                    print(f"\nPage {page.page_number}: {len(page.sections)} sections")
+                    for section in page.sections:
+                        print(f"  {section.id}. {section.title} ({len(section.clauses)} clauses)")
+            else:
+                # Parse single image
+                page = await parse_contract_image(input_path, page_number=1, session=session)
+                if page:
+                    print(f"\n{'='*60}")
+                    print(f"Page {page.page_number}")
+                    print(f"Sections found: {len(page.sections)}")
+                    print(f"{'='*60}")
+                    for section in page.sections:
+                        print(f"\n{section.id}. {section.title}")
+                        print(f"   Clauses: {len(section.clauses)}")
+        except Exception as e:
+            print(f"\n❌ Parsing failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # End session and flush traces (always executed)
+            session.end()
+            flush_traces()
     
     asyncio.run(main())
