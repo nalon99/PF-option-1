@@ -118,7 +118,7 @@ async def assemble_document(
         }
         pages_data.append(page_dict)
     
-    print(f"📄 Assembling {len(pages)} pages into document...")
+    print(f"📄 Assembling {document_name} {len(pages)} pages into document...")
     
     # Create generation for LLM call tracing (tracks model, tokens, cost)
     span = session.create_generation(
