@@ -29,7 +29,7 @@ Contract folder structure:
         └── amendment/
 """
 
-import datetime
+import asyncio
 import os
 import sys
 import json
@@ -144,17 +144,7 @@ def analyze_contract_amendment(
         
     Raises:
         ValueError: If any step fails
-    """
-    # # Create main workflow span
-    # workflow_span = session.create_span(
-    #     name="contract_analysis_workflow",
-    #     input_data={
-    #         "original_folder": original_folder,
-    #         "amendment_folder": amendment_folder
-    #     },
-    #     metadata={"operation": "full_workflow"}
-    # )
-    
+    """    
     try:
         # =================================================================
         # STEP 1: Parse Images
@@ -301,22 +291,6 @@ def process_contract_pair(
     print(f"CONTRACT AMENDMENT ANALYSIS: {pair_name}")
     print("="*70)
     
-    # Validate folders
-    print("\n🔍 Validating input folders...")
-    
-    valid, msg = validate_folder(str(original_folder))
-    if not valid:
-        print(f"❌ Original folder error: {msg}")
-        return None
-    print(f"✅ Original folder: {msg}")
-    
-    valid, msg = validate_folder(str(amendment_folder))
-    if not valid:
-        print(f"❌ Amendment folder error: {msg}")
-        return None
-    print(f"✅ Amendment folder: {msg}")
-    
-    
     session = TracingSession(
         contract_id=pair_name,
         session_name=f"Contract Analysis - {pair_name}"
@@ -390,6 +364,23 @@ def process_contract_pair(
     finally:
         session.end()
 
+async def process_all_pairs(pairs_to_process: List[Tuple[str, Path, Path]]):
+    """Process all contract pairs concurrently."""
+    async def process_pair_async(pair_name, original_folder, amendment_folder):
+        """Async wrapper to run process_contract_pair in a thread."""
+        return pair_name, await asyncio.to_thread(
+            process_contract_pair, pair_name, original_folder, amendment_folder
+        )
+    
+    # Create tasks for all pairs
+    tasks = [
+        process_pair_async(pair_name, original_folder, amendment_folder)
+        for pair_name, original_folder, amendment_folder in pairs_to_process
+    ]
+    
+    # Run all tasks concurrently and gather results
+    return await asyncio.gather(*tasks, return_exceptions=True)
+    
 
 # =============================================================================
 # MAIN ENTRY POINT
@@ -441,14 +432,42 @@ def main():
         print("❌ No valid pairs to process!")
         sys.exit(1)
     
-    print(f"\n🔄 Processing {len(pairs_to_process)} pair(s)...")
-    
-    # Process each pair
-    results = {}
+    # Validate ALL folders upfront (fail-fast approach)
+    print("\n🔍 Validating all input folders...")
+    all_valid = True
     for pair_name, original_folder, amendment_folder in pairs_to_process:
-        result = process_contract_pair(pair_name, original_folder, amendment_folder)
-        if result:
-            results[pair_name] = result
+        valid, msg = validate_folder(str(original_folder))
+        if not valid:
+            print(f"❌ {pair_name}/original: {msg}")
+            all_valid = False
+        else:
+            print(f"✅ {pair_name}/original: {msg}")
+        
+        valid, msg = validate_folder(str(amendment_folder))
+        if not valid:
+            print(f"❌ {pair_name}/amendment: {msg}")
+            all_valid = False
+        else:
+            print(f"✅ {pair_name}/amendment: {msg}")
+    
+    if not all_valid:
+        print("\n❌ Validation failed. Fix issues before processing.")
+        sys.exit(1)
+    
+    # Process all pairs concurrently using asyncio
+    print(f"\n🔄 Processing {len(pairs_to_process)} pair(s) concurrently...")
+    # Run the async processing
+    pair_results = asyncio.run(process_all_pairs(pairs_to_process))
+    
+    # Collect successful results
+    results = {}
+    for item in pair_results:
+        if isinstance(item, Exception):
+            print(f"❌ Task failed with exception: {item}")
+        elif item is not None:
+            pair_name, result = item
+            if result:
+                results[pair_name] = result
     
     # Final summary
     print("\n" + "="*70)
