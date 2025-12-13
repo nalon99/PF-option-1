@@ -71,25 +71,58 @@ how to view dashboard, at least 50 words
 
 Several optimizations were implemented to reduce latency and cost of the multi-agent pipeline.
 
-### 8.1 Parallel Document Assembly
+### 8.1 AsyncOpenAI for Native Async
+
+**Problem**: The synchronous OpenAI client blocks threads during I/O waits, limiting concurrency.
+
+**Solution**: Use `AsyncOpenAI` client with native async/await throughout the codebase:
+
+```python
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+# All LLM calls are now non-blocking
+completion = await client.chat.completions.create(...)
+```
+
+**Result**: Enables true async concurrency without thread overhead. Multiple LLM calls can run simultaneously in a single thread.
+
+### 8.2 Parallel Document Assembly
 
 **Problem**: The `ContextualizationAgent` assembled original and amended documents sequentially (~8s + ~8s = ~16s).
 
-**Solution**: Use `concurrent.futures.ThreadPoolExecutor` to assemble both documents in parallel.
+**Solution**: Use `asyncio.gather()` to assemble both documents in parallel:
 
 ```python
-with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-    ctx_original = contextvars.copy_context()
-    ctx_amended = contextvars.copy_context()
-    future_original = executor.submit(ctx_original.run, assemble_document, ...)
-    future_amended = executor.submit(ctx_amended.run, assemble_document, ...)
+# Run both assembly tasks concurrently
+results = await asyncio.gather(
+    assemble_document(original_pages, original_name, self.session),
+    assemble_document(amended_pages, amended_name, self.session),
+    return_exceptions=True
+)
 ```
-
-**Key detail**: `contextvars.copy_context()` propagates the Langfuse tracing context to worker threads, preserving the observation hierarchy.
 
 **Result**: Assembly step reduced from ~16s to ~8s (50% faster).
 
-### 8.2 Compact LLM Prompts
+### 8.3 Parallel Image Parsing
+
+**Problem**: Contract pages were parsed sequentially (5 pages × ~3s = ~15s per folder).
+
+**Solution**: Parse all pages in a folder concurrently using `asyncio.gather()`:
+
+```python
+# Parse all pages concurrently
+tasks = [
+    parse_contract_image(str(image_file), page_number=i, session=session)
+    for i, image_file in enumerate(image_files, start=1)
+]
+results = await asyncio.gather(*tasks, return_exceptions=True)
+```
+
+**Result**: Folder parsing reduced from ~15s to ~3s (time of slowest page).
+
+### 8.4 Compact LLM Prompts
 
 **Problem**: Verbose prompts with pretty-printed JSON examples consume more tokens and slow down LLM responses.
 
@@ -121,7 +154,7 @@ RULES:
 
 **Result**: ~60% fewer prompt tokens, ~2-3s faster per LLM call.
 
-### 8.3 Optimized Output Format
+### 8.5 Optimized Output Format
 
 **Problem**: The alignment step asked the LLM to output full content for ALL sections, even unchanged ones.
 
@@ -137,7 +170,7 @@ RULES:
 
 **Result**: ~70% fewer output tokens, alignment reduced from ~12s to ~4-6s.
 
-### 8.4 Compact Input JSON
+### 8.6 Compact Input JSON
 
 **Problem**: `json.dumps(..., indent=2)` adds whitespace, increasing input token count.
 
@@ -157,12 +190,13 @@ json.dumps(data, separators=(',',':'))  # Compact, ~1200 tokens
 
 | Step | Before | After | Improvement |
 |------|--------|-------|-------------|
-| Document Assembly (×2) | ~16s (sequential) | ~8s (parallel) | **50%** |
+| Image Parsing (5 pages) | ~15s (sequential) | ~3s (parallel async) | **80%** |
+| Document Assembly (×2) | ~16s (sequential) | ~8s (parallel async) | **50%** |
 | Document Alignment | ~12s | ~4-6s | **50-60%** |
 | Extraction Input | All sections | Changed only | **~70% fewer tokens** |
-| **Total Pipeline** | ~28s+ | ~12-14s | **~50%** |
+| **Total Pipeline (per pair)** | ~43s+ | ~15-20s | **~60%** |
 
-### 8.5 Extraction Input Filtering
+### 8.7 Extraction Input Filtering
 
 **Problem**: Agent 2 (Extraction) received ALL aligned sections, including unchanged ones with empty content.
 
@@ -178,7 +212,7 @@ changed_sections = [s for s in all_sections if s.has_changes]
 
 **Result**: ~70% fewer input tokens for extraction, clearer context for LLM.
 
-### 8.6 Error Level Tracking in Langfuse
+### 8.8 Error Level Tracking in Langfuse
 
 **Problem**: Errors were not clearly visible in Langfuse UI - required reading output to identify failures.
 
@@ -199,12 +233,32 @@ span.error("Error message")          # Sets level="ERROR" on span
 
 These optimizations follow key principles:
 
-1. **Parallelism**: Independent operations should run concurrently
-2. **Token efficiency**: Fewer tokens = faster responses = lower cost
-3. **Output minimization**: Don't ask the LLM to generate redundant data
-4. **Context preservation**: Use `contextvars` to maintain tracing hierarchy across threads
+1. **Native Async**: Use `AsyncOpenAI` for true non-blocking I/O without thread overhead
+2. **Parallelism**: Independent operations (page parsing, document assembly) run concurrently via `asyncio.gather()`
+3. **Token efficiency**: Fewer tokens = faster responses = lower cost
+4. **Output minimization**: Don't ask the LLM to generate redundant data
 5. **Input filtering**: Only send relevant data to each agent (changed sections only)
 6. **Observability**: Make errors clearly visible in tracing UI for faster debugging
+7. **Fail-fast validation**: Catch setup errors before spending resources on LLM calls
+
+### 8.9 Fail-Fast Validation
+
+**Behavior**: Before processing any contract pairs, all input folders are validated upfront. If any folder is missing or contains no images, the entire batch exits with an error.
+
+```
+🔍 Validating all input folders...
+✅ pair_1/original: Found 5 image files
+✅ pair_1/amendment: Found 5 image files
+❌ pair_2/original: No image files found
+❌ Validation failed. Fix issues before processing.
+```
+
+**Rationale**:
+- **Validation is cheap, processing is expensive** — Folder checks take milliseconds; LLM calls cost money and time
+- **Missing files = setup error** — Should be fixed before spending resources, not silently skipped
+- **Clear mental model** — Either all pairs succeed, or you get a clear error list upfront
+
+This is the preferred default for small batches with explicit pair selection. As an improvment measure for large batch jobs where partial results are acceptable, a `--best-effort` flag could be added in the future.
 
 ## Test Data Structure
 

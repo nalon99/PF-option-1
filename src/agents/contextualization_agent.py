@@ -8,16 +8,16 @@ and responsibilities, this is Agent 1:
 
 Output is passed to Agent 2 (Extraction Agent) for change identification.
 Includes Langfuse tracing for monitoring all LLM calls.
+Uses AsyncOpenAI for concurrent LLM calls.
 """
 
+import asyncio
 import datetime
 import os
 import json
-import concurrent.futures
-import contextvars
 from typing import List, Optional
 from pathlib import Path
-from openai import OpenAI
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
@@ -45,15 +45,15 @@ USE_OPEN_ROUTER = os.getenv("USE_OPEN_ROUTER", "false").lower() == "true"
 # Keep original model name for Langfuse cost tracking (e.g., "gpt-4o")
 LANGFUSE_MODEL_NAME = AI_MODEL
 
-# Initialize client
+# Initialize async client
 if USE_OPEN_ROUTER:
-    client = OpenAI(
+    client = AsyncOpenAI(
         api_key=OPENAI_API_KEY,
         base_url="https://openrouter.ai/api/v1"
     )
     AI_MODEL = f"openai/{AI_MODEL}"
 else:
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
 # =============================================================================
@@ -75,7 +75,7 @@ RULES:
 """
 
 
-def assemble_document(
+async def assemble_document(
     pages: List[ParsedContractPage],
     document_name: str,
     session: TracingSession
@@ -133,9 +133,8 @@ def assemble_document(
     )
     
     try:
-        # Trace LLM call (REQUIRED)
-        # Removed trace_llm_call - using span instead
-        completion = client.chat.completions.create(
+        # Async LLM call
+        completion = await client.chat.completions.create(
             model=AI_MODEL,
             messages=[
                 {
@@ -242,7 +241,7 @@ Rules:
 """
 
 
-def align_documents(
+async def align_documents(
     original: ParsedContractDocument,
     amended: ParsedContractDocument,
     session: TracingSession
@@ -309,9 +308,8 @@ def align_documents(
     )
     
     try:
-        # Trace LLM call (REQUIRED)
-        # Removed trace_llm_call - using span instead
-        completion = client.chat.completions.create(
+        # Async LLM call
+        completion = await client.chat.completions.create(
             model=AI_MODEL,
             messages=[
                 {
@@ -395,7 +393,7 @@ class ContextualizationAgent:
         self.amended_document: Optional[ParsedContractDocument] = None
         self.alignment: Optional[ContextualizationOutput] = None
     
-    def agent_contextualize(
+    async def agent_contextualize(
         self,
         original_pages: List[ParsedContractPage],
         amended_pages: List[ParsedContractPage],
@@ -435,23 +433,27 @@ class ContextualizationAgent:
         )
         
         try:
-            # Step 1: Assemble documents (PARALLEL for ~8s speedup)
-            print("\n📋 STEP 2.1: Document Assembly (parallel)")
+            # Step 1: Assemble documents (PARALLEL using asyncio.gather)
+            print("\n📋 STEP 2.1: Document Assembly (parallel async)")
             print("-"*40)
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                # Copy context separately for each thread to propagate Langfuse hierarchy
-                ctx_original = contextvars.copy_context()
-                ctx_amended = contextvars.copy_context()
-                future_original = executor.submit(
-                    ctx_original.run, assemble_document, original_pages, original_name, self.session
-                )
-                future_amended = executor.submit(
-                    ctx_amended.run, assemble_document, amended_pages, amended_name, self.session
-                )
+            # Run both assembly tasks concurrently
+            results = await asyncio.gather(
+                assemble_document(original_pages, original_name, self.session),
+                assemble_document(amended_pages, amended_name, self.session),
+                return_exceptions=True
+            )
+            
+            # Handle results
+            if isinstance(results[0], Exception):
+                print(f"❌ Failed to assemble original document: {results[0]}")
+                return None
+            if isinstance(results[1], Exception):
+                print(f"❌ Failed to assemble amended document: {results[1]}")
+                return None
                 
-                self.original_document = future_original.result()
-                self.amended_document = future_amended.result()
+            self.original_document = results[0]
+            self.amended_document = results[1]
             
             if not self.original_document:
                 print("❌ Failed to assemble original document")
@@ -465,7 +467,7 @@ class ContextualizationAgent:
             print("\n🔗 STEP 2.2: Document Alignment")
             print("-"*40)
             
-            self.alignment = align_documents(self.original_document, self.amended_document, self.session)
+            self.alignment = await align_documents(self.original_document, self.amended_document, self.session)
             if not self.alignment:
                 print("❌ Failed to align documents")
                 return None

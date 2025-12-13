@@ -9,15 +9,17 @@ Functions for:
 - Extracts structured text preserving document hierarchy (sections, subsections, clauses)
 - Handles various image qualities (scanned, photographed, different resolutions)
 - Langfuse tracing integration for monitoring
+- Async support with AsyncOpenAI for parallel page processing
 """
 
+import asyncio
 import datetime
 import os
 import json
 import base64
 from typing import List, Optional
 from pathlib import Path
-from openai import OpenAI
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
@@ -36,16 +38,16 @@ USE_OPEN_ROUTER = os.getenv("USE_OPEN_ROUTER", "false").lower() == "true"
 # Keep original model name for Langfuse cost tracking (e.g., "gpt-4o")
 LANGFUSE_MODEL_NAME = AI_MODEL
 
-# Initialize client (same API key for both OpenAI and OpenRouter)
+# Initialize async client (same API key for both OpenAI and OpenRouter)
 if USE_OPEN_ROUTER:
-    client = OpenAI(
+    client = AsyncOpenAI(
         api_key=OPENAI_API_KEY,
         base_url="https://openrouter.ai/api/v1"
     )
     # OpenRouter requires provider prefix (e.g., "openai/gpt-4o")
     AI_MODEL = f"openai/{AI_MODEL}"
 else:
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
 # Supported image formats
@@ -145,7 +147,7 @@ Rules:
 """
 
 
-def parse_contract_image(
+async def parse_contract_image(
     image_path: str,
     page_number: int,
     session: TracingSession
@@ -190,7 +192,8 @@ def parse_contract_image(
     )
     
     try:
-        completion = client.chat.completions.create(
+        # Async LLM call
+        completion = await client.chat.completions.create(
             model=AI_MODEL,
             messages=[
                 {
@@ -264,12 +267,12 @@ def parse_contract_image(
         span.end()
 
 
-def parse_contract_folder(
+async def parse_contract_folder(
     folder_path: str,
     session: TracingSession
 ) -> List[ParsedContractPage]:
     """
-    Parse all contract images in a folder.
+    Parse all contract images in a folder concurrently.
     
     Args:
         folder_path: Path to folder containing contract page images
@@ -293,7 +296,7 @@ def parse_contract_folder(
         print(f"No images found in: {folder_path}")
         return []
     
-    print(f"Found {len(image_files)} images in {folder_path}")
+    print(f"Found {len(image_files)} images in {folder_path} - parsing in parallel...")
     
     # Create span for folder parsing (REQUIRED)
     span = session.create_span(
@@ -306,11 +309,23 @@ def parse_contract_folder(
         }
     )
     
+    # Parse all pages concurrently using asyncio.gather
+    tasks = [
+        parse_contract_image(str(image_file), page_number=i, session=session)
+        for i, image_file in enumerate(image_files, start=1)
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Filter successful results and handle exceptions
     parsed_pages = []
-    for i, image_file in enumerate(image_files, start=1):
-        page = parse_contract_image(str(image_file), page_number=i, session=session)
-        if page:
-            parsed_pages.append(page)
+    for i, result in enumerate(results, start=1):
+        if isinstance(result, Exception):
+            print(f"❌ Page {i} failed with exception: {result}")
+        elif result is not None:
+            parsed_pages.append(result)
+    
+    # Sort by page number to maintain order
+    parsed_pages.sort(key=lambda p: p.page_number)
     
     # Update span with results
     span.update(
@@ -326,33 +341,36 @@ def parse_contract_folder(
 if __name__ == "__main__":
     from tracing import create_session, flush_traces
     
-    input_path = "data/test_contracts/pair_1/original/page_01.png"
-    
-    # Create a tracing session
-    session = create_session(contract_id="cli_test")
-    
-    if Path(input_path).is_dir():
-        # Parse all images in folder
-        pages = parse_contract_folder(input_path, session=session)
-        print(f"\n{'='*60}")
-        print(f"Parsed {len(pages)} pages")
-        print(f"{'='*60}")
-        for page in pages:
-            print(f"\nPage {page.page_number}: {len(page.sections)} sections")
-            for section in page.sections:
-                print(f"  {section.id}. {section.title} ({len(section.clauses)} clauses)")
-    else:
-        # Parse single image
-        page = parse_contract_image(input_path, session=session)
-        if page:
+    async def main():
+        input_path = "data/test_contracts/pair_1/original/page_01.png"
+        
+        # Create a tracing session
+        session = create_session(contract_id="cli_test")
+        
+        if Path(input_path).is_dir():
+            # Parse all images in folder (parallel)
+            pages = await parse_contract_folder(input_path, session=session)
             print(f"\n{'='*60}")
-            print(f"Page {page.page_number}")
-            print(f"Sections found: {len(page.sections)}")
+            print(f"Parsed {len(pages)} pages")
             print(f"{'='*60}")
-            for section in page.sections:
-                print(f"\n{section.id}. {section.title}")
-                print(f"   Clauses: {len(section.clauses)}")
+            for page in pages:
+                print(f"\nPage {page.page_number}: {len(page.sections)} sections")
+                for section in page.sections:
+                    print(f"  {section.id}. {section.title} ({len(section.clauses)} clauses)")
+        else:
+            # Parse single image
+            page = await parse_contract_image(input_path, page_number=1, session=session)
+            if page:
+                print(f"\n{'='*60}")
+                print(f"Page {page.page_number}")
+                print(f"Sections found: {len(page.sections)}")
+                print(f"{'='*60}")
+                for section in page.sections:
+                    print(f"\n{section.id}. {section.title}")
+                    print(f"   Clauses: {len(section.clauses)}")
+        
+        # End session and flush traces
+        session.end()
+        flush_traces()
     
-    # End session and flush traces
-    session.end(status="success")
-    flush_traces()
+    asyncio.run(main())

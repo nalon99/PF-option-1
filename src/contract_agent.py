@@ -126,7 +126,7 @@ def validate_folder(folder_path: str) -> Tuple[bool, str]:
 # MAIN WORKFLOW
 # =============================================================================
 
-def analyze_contract_amendment(
+async def analyze_contract_amendment(
     original_folder: str,
     amendment_folder: str,
     session: TracingSession
@@ -147,20 +147,22 @@ def analyze_contract_amendment(
     """    
     try:
         # =================================================================
-        # STEP 1: Parse Images
+        # STEP 1: Parse Images (parallel)
         # =================================================================
         print("\n" + "="*70)
-        print("STEP 1: IMAGE PARSING")
+        print("STEP 1: IMAGE PARSING (parallel)")
         print("="*70)
         
-        print(f"\n📂 Parsing original contract from: {original_folder}")
-        original_pages = parse_contract_folder(original_folder, session)
+        print(f"\n📂 Parsing both contracts in parallel...")
+        original_pages, amendment_pages = await asyncio.gather(
+            parse_contract_folder(original_folder, session),
+            parse_contract_folder(amendment_folder, session)
+        )
+        
         if not original_pages:
             raise ValueError("Failed to parse original contract images")
         print(f"✅ Parsed {len(original_pages)} pages from original contract")
         
-        print(f"\n📂 Parsing amendment contract from: {amendment_folder}")
-        amendment_pages = parse_contract_folder(amendment_folder, session)
         if not amendment_pages:
             raise ValueError("Failed to parse amendment contract images")
         print(f"✅ Parsed {len(amendment_pages)} pages from amendment contract")
@@ -173,7 +175,7 @@ def analyze_contract_amendment(
         print("="*70)
         
         agent1 = ContextualizationAgent(session)
-        contextualization_output = agent1.agent_contextualize(
+        contextualization_output = await agent1.agent_contextualize(
             original_pages=original_pages,
             amended_pages=amendment_pages,
             original_name="Original Contract",
@@ -209,7 +211,7 @@ def analyze_contract_amendment(
         handoff_span.end()
         
         agent2 = ExtractionAgent(session=session)
-        extraction_result = agent2.agent_extract_changes(contextualization_output)
+        extraction_result = await agent2.agent_extract_changes(contextualization_output)
         
         print(f"\n✅ Agent 2 complete:")
         print(f"   - Sections changed: {len(extraction_result.sections_changed)}")
@@ -271,7 +273,7 @@ def analyze_contract_amendment(
 # PROCESS SINGLE CONTRACT PAIR
 # =============================================================================
 
-def process_contract_pair(
+async def process_contract_pair(
     pair_name: str,
     original_folder: Path,
     amendment_folder: Path
@@ -297,8 +299,8 @@ def process_contract_pair(
     )
    
     try:
-        # Run analysis
-        result = analyze_contract_amendment(
+        # Run analysis (async)
+        result = await analyze_contract_amendment(
             original_folder=str(original_folder),
             amendment_folder=str(amendment_folder),
             session=session
@@ -365,12 +367,11 @@ def process_contract_pair(
         session.end()
 
 async def process_all_pairs(pairs_to_process: List[Tuple[str, Path, Path]]):
-    """Process all contract pairs concurrently."""
+    """Process all contract pairs concurrently using native async."""
     async def process_pair_async(pair_name, original_folder, amendment_folder):
-        """Async wrapper to run process_contract_pair in a thread."""
-        return pair_name, await asyncio.to_thread(
-            process_contract_pair, pair_name, original_folder, amendment_folder
-        )
+        """Async wrapper that returns pair_name with result."""
+        result = await process_contract_pair(pair_name, original_folder, amendment_folder)
+        return pair_name, result
     
     # Create tasks for all pairs
     tasks = [

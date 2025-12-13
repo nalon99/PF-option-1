@@ -9,13 +9,15 @@ and responsibilities, this is Agent 2:
 
 Shows clear handoff mechanism: Agent 1 output → Agent 2 input
 Includes Langfuse tracing for monitoring all LLM calls.
+Uses AsyncOpenAI for async LLM calls.
 """
 
+import asyncio
 import os
 import json
 from typing import Optional
 from pathlib import Path
-from openai import OpenAI
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
@@ -40,15 +42,15 @@ USE_OPEN_ROUTER = os.getenv("USE_OPEN_ROUTER", "false").lower() == "true"
 # Keep original model name for Langfuse cost tracking (e.g., "gpt-4o")
 LANGFUSE_MODEL_NAME = AI_MODEL
 
-# Initialize client
+# Initialize async client
 if USE_OPEN_ROUTER:
-    client = OpenAI(
+    client = AsyncOpenAI(
         api_key=OPENAI_API_KEY,
         base_url="https://openrouter.ai/api/v1"
     )
     AI_MODEL = f"openai/{AI_MODEL}"
 else:
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 
 # =============================================================================
@@ -116,7 +118,7 @@ class ExtractionAgent:
         """Initialize the extraction agent with optional tracing session."""
         self.session = session
     
-    def agent_extract_changes(
+    async def agent_extract_changes(
         self,
         contextualization_output: ContextualizationOutput
     ) -> ContractAnalysisResult:
@@ -183,8 +185,8 @@ class ExtractionAgent:
                 "aligned_sections": changed_sections
             }
             
-            # Call LLM for extraction
-            result = self._call_extraction_llm(input_data, span)
+            # Call LLM for extraction (async)
+            result = await self._call_extraction_llm(input_data, span)
             
             span.update(output={
                 "sections_changed": result.sections_changed,
@@ -200,7 +202,7 @@ class ExtractionAgent:
             span.end()
             raise
     
-    def _call_extraction_llm(self, input_data: dict, span: SpanWrapper) -> ContractAnalysisResult:
+    async def _call_extraction_llm(self, input_data: dict, span: SpanWrapper) -> ContractAnalysisResult:
         """
         Call LLM to extract changes from aligned sections.
         
@@ -212,15 +214,9 @@ class ExtractionAgent:
         """
         input_json = json.dumps(input_data, indent=2)
         
-        # Trace LLM call
-        # with trace_llm_call(
-        #     self.session,
-        #     "llm_agent_extract_changes",
-        #     AI_MODEL,
-        #     "extraction_agent"
-        # ) as gen:
         try:
-            completion = client.chat.completions.create(
+            # Async LLM call
+            completion = await client.chat.completions.create(
                 model=AI_MODEL,
                 messages=[
                     {"role": "system", "content": EXTRACTION_PROMPT},
@@ -306,7 +302,7 @@ class ExtractionAgent:
 # CONVENIENCE FUNCTION
 # =============================================================================
 
-def extract_contract_changes(
+async def extract_contract_changes(
     contextualization_output: ContextualizationOutput,
     session: TracingSession
 ) -> ContractAnalysisResult:
@@ -321,7 +317,7 @@ def extract_contract_changes(
         ContractAnalysisResult: Structured extraction result
     """
     agent = ExtractionAgent(session=session)
-    return agent.agent_extract_changes(contextualization_output)
+    return await agent.agent_extract_changes(contextualization_output)
 
 
 # =============================================================================
@@ -333,66 +329,69 @@ if __name__ == "__main__":
     from pathlib import Path
     from tracing import create_session
     
-    parser = argparse.ArgumentParser(description="Test Extraction Agent with contextualization output")
-    parser.add_argument(
-        "input_file",
-        type=str,
-        help="Path to contextualization_output.json file"
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Output file path (default: same directory as input)"
-    )
-    
-    args = parser.parse_args()
-    
-    input_path = Path(args.input_file)
-    if not input_path.exists():
-        print(f"❌ Input file not found: {input_path}")
-        sys.exit(1)
-    
-    # Load contextualization output
-    print(f"\n📄 Loading contextualization output from: {input_path}")
-    with open(input_path, 'r') as f:
-        ctx_data = json.load(f)
-    
-    ctx_output = ContextualizationOutput(**ctx_data)
-    print(f"✅ Loaded {len(ctx_output.aligned_sections)} aligned sections")
-    print(f"   Sections with changes: {sum(1 for s in ctx_output.aligned_sections if s.has_changes)}")
-    
-    # Create tracing session
-    session = create_session(contract_id="extraction_test")
-    
-    # Run extraction
-    print("\n🔍 Running Extraction Agent...")
-    try:
-        result = extract_contract_changes(ctx_output, session)
+    async def main():
+        parser = argparse.ArgumentParser(description="Test Extraction Agent with contextualization output")
+        parser.add_argument(
+            "input_file",
+            type=str,
+            help="Path to contextualization_output.json file"
+        )
+        parser.add_argument(
+            "--output",
+            type=str,
+            default=None,
+            help="Output file path (default: same directory as input)"
+        )
         
-        print("\n✅ Extraction complete!")
-        print(f"\n📊 Results:")
-        print(f"   Sections changed: {len(result.sections_changed)}")
-        for sec in result.sections_changed:
-            print(f"      - {sec}")
+        args = parser.parse_args()
         
-        print(f"\n   Topics touched: {len(result.topics_touched)}")
-        for topic in result.topics_touched:
-            print(f"      - {topic}")
+        input_path = Path(args.input_file)
+        if not input_path.exists():
+            print(f"❌ Input file not found: {input_path}")
+            sys.exit(1)
         
-        print(f"\n   Summary of changes:")
-        for i, summary in enumerate(result.summary_of_the_change, 1):
-            print(f"      {i}. {summary}")
+        # Load contextualization output
+        print(f"\n📄 Loading contextualization output from: {input_path}")
+        with open(input_path, 'r') as f:
+            ctx_data = json.load(f)
         
-        # Save output
-        output_path = args.output or input_path.parent / "extraction_output.json"
-        with open(output_path, 'w') as f:
-            json.dump(result.model_dump(), f, indent=2)
-        print(f"\n💾 Output saved to: {output_path}")
+        ctx_output = ContextualizationOutput(**ctx_data)
+        print(f"✅ Loaded {len(ctx_output.aligned_sections)} aligned sections")
+        print(f"   Sections with changes: {sum(1 for s in ctx_output.aligned_sections if s.has_changes)}")
         
-    except Exception as e:
-        print(f"\n❌ Extraction failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        session.end(output={"status": "completed"}, status="success")
+        # Create tracing session
+        session = create_session(contract_id="extraction_test")
+        
+        # Run extraction
+        print("\n🔍 Running Extraction Agent...")
+        try:
+            result = await extract_contract_changes(ctx_output, session)
+            
+            print("\n✅ Extraction complete!")
+            print(f"\n📊 Results:")
+            print(f"   Sections changed: {len(result.sections_changed)}")
+            for sec in result.sections_changed:
+                print(f"      - {sec}")
+            
+            print(f"\n   Topics touched: {len(result.topics_touched)}")
+            for topic in result.topics_touched:
+                print(f"      - {topic}")
+            
+            print(f"\n   Summary of changes:")
+            for i, summary in enumerate(result.summary_of_the_change, 1):
+                print(f"      {i}. {summary}")
+            
+            # Save output
+            output_path = args.output or input_path.parent / "extraction_output.json"
+            with open(output_path, 'w') as f:
+                json.dump(result.model_dump(), f, indent=2)
+            print(f"\n💾 Output saved to: {output_path}")
+            
+        except Exception as e:
+            print(f"\n❌ Extraction failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            session.end()
+    
+    asyncio.run(main())

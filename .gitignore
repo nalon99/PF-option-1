@@ -58,3 +58,8 @@ Thumbs.db
 *.log
 logs/
 
+# remove test_contracts_*_page folder
+data/test_contracts_*_page/
+
+# remove testone_contract folder
+data/testone_contract/
