@@ -1,26 +1,19 @@
 {
   "sections_changed": [
-    "2.1. Term",
-    "2.2. Termination for Cause",
-    "2.3. Termination for Convenience",
-    "3.1. Fees",
-    "3.2. Late Payment",
-    "6.2. Cap on Liability"
+    "II. TERM, TERMINATION, AND SUSPENSION",
+    "III. COMPENSATION, BILLING, AND EXPENSES",
+    "VI. LIMITATION OF LIABILITY"
   ],
   "topics_touched": [
     "Contract Duration",
-    "Termination Conditions",
-    "Termination Conditions",
-    "Payment Terms",
-    "Payment Terms",
+    "Monthly Fee",
+    "Late Payment Interest",
     "Liability Cap"
   ],
   "summary_of_the_change": [
-    "The initial contract term was extended from twenty-four (24) months to thirty-six (36) months (Sec. 2.1).",
-    "The notice period for termination for cause was increased from 15 days to 30 days (Sec. 2.2).",
-    "The notice period for termination for convenience was increased from 60 days to 90 days (Sec. 2.3).",
-    "The fixed monthly compensation rate was increased from 15000 USD to 18000 USD (Sec. 3.1).",
-    "The interest rate on late payments was increased from 1.5% per month to 2.0% per month (Sec. 3.2).",
-    "The liability cap was changed from three (3) months to six (6) months of fees paid (Sec. 6.2)."
+    "Contract term extended from 24 to 36 months (Sec. 2.1).",
+    "Monthly fee increased from 15,000 USD to 18,000 USD (Sec. 3.1).",
+    "Late payment interest rate increased from 1.5% to 2.0% per month (Sec. 3.2).",
+    "Liability cap increased from three months to six months of fees paid (Sec. 6.2)."
   ]
 }

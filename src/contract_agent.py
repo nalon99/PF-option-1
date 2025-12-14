@@ -185,9 +185,15 @@ async def analyze_contract_amendment(
         if not contextualization_output:
             raise ValueError("Agent 1 (Contextualization) failed to produce output")
         
+        # Save contextualization output for debugging/inspection
+        ctx_output_file = Path(original_folder).parent / "contextualization_output.json"
+        with open(ctx_output_file, 'w') as f:
+            json.dump(contextualization_output.model_dump(), f, indent=2)
+        
         print(f"\n✅ Agent 1 complete:")
         print(f"   - Aligned sections: {len(contextualization_output.aligned_sections)}")
         print(f"   - Sections with changes: {sum(1 for s in contextualization_output.aligned_sections if s.has_changes)}")
+        print(f"   - Saved to: {ctx_output_file}")
         
         # =================================================================
         # STEP 3: Agent 2 - Extraction (HANDOFF)

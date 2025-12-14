@@ -57,45 +57,45 @@ else:
 # EXTRACTION PROMPT
 # =============================================================================
 
-EXTRACTION_PROMPT = """You are a legal document analyst specializing in contract amendments. Your task is to analyze the aligned sections between an original contract and its amendment, then extract and summarize all changes.
+EXTRACTION_PROMPT = """Analyze contract amendments and extract ALL changes from the original to the amended contract.
 
-You will receive ONLY the sections that contain changes (pre-filtered). Analyze the differences between original_content and amended_content for EACH section provided.
+Output format:
+1. sections_changed: List modified sections as "SECTION_ID. SECTION_TITLE"
+2. topics_touched: Business topic for each change (e.g., "Contract Duration", "Payment Terms")
+3. summary_of_the_change: Description for each change with section reference at END in parentheses
 
-Your analysis should produce:
+Rules:
+- topics_touched and summary_of_the_change must have the same count (1:1 mapping)
+- Check EVERY clause (2.1, 2.2, 2.3, etc.) for numerical/value or meaning differences
+- No markdown formatting
+- Sort by section number ascending (2.1, 2.2, 2.3, 3.1, 3.2...)
+- Ignore OCR artifacts
 
-1. **sections_changed**: List the section identifiers and titles that were modified.
-   Format: "SECTION_ID. SECTION_TITLE"
-   Example: "II. TERM, TERMINATION, AND SUSPENSION"
-
-2. **topics_touched**: Identify the business/legal topics affected by the changes.
-   These should be high-level categories, not section names.
-   Examples: "Contract Duration", "Payment Terms", "Liability Cap", "Termination Conditions"
-   
-3. **summary_of_the_change**: Provide detailed descriptions of each specific change.
-   Each item should:
-   - Clearly state what changed from original to new value
-   - Use **bold** markdown for new values
-   - Include section reference in parentheses
-   - Be a complete, standalone sentence
-   Example: "The initial contract term was extended from twenty-four (24) months to **thirty-six (36) months** (Sec. 2.1)."
-
-IMPORTANT RULES:
-- The number of items in "topics_touched" MUST equal the number of items in "summary_of_the_change"
-- Each summary item describes one specific change that corresponds to one topic
-- Only report actual substantive changes, not formatting or minor wording differences
-- Ignore changes where the pipe "|" character appears - this represents OCR artifacts, not real changes
-- Summary items must be at least 20 characters long
-- Remove any markdown formatting from the summary items
-
-Return a JSON object with this exact structure:
+Example JSON:
 {
-    "sections_changed": ["II. TERM, TERMINATION, AND SUSPENSION", "III. COMPENSATION"],
-    "topics_touched": ["Contract Duration", "Payment Terms"],
+    "sections_changed": ["II. TERM", "III. COMPENSATION"],
+    "topics_touched": ["Contract Duration", "Notice Period", "Monthly Fee"],
     "summary_of_the_change": [
-        "The initial contract term was extended from twenty-four (24) months to **thirty-six (36) months** (Sec. 2.1).",
-        "The fixed monthly compensation rate was increased from $15,000 USD to **$18,000 USD** (Sec. 3.1)."
+        "Contract term extended from 24 to 36 months (Sec. 2.1).",
+        "Late payment interest rate increased from 1.5% to 2.0% per month (Sec. 3.2).",
+        "Liability cap increased from three months to six months of fees paid (Sec. 6.2)."
     ]
 }
+"""
+# - Use Arabic numerals for section references: (Sec. 2.1) and not (Sec. II.1)
+
+CORRECTION_PROMPT = """Your previous response had a validation error:
+{error_message}
+
+Please fix your response. The CRITICAL requirement is:
+- topics_touched and summary_of_the_change MUST have EXACTLY THE SAME NUMBER OF ITEMS
+
+Your previous response had {topics_count} topics but {summary_count} summaries.
+You must adjust to have equal counts. Either:
+1. Add more topics to match the summaries, OR
+2. Combine related summaries to match the topics
+
+Return a corrected JSON object with matching counts.
 """
 
 
@@ -202,49 +202,97 @@ class ExtractionAgent:
             span.end()
             raise
     
-    async def _call_extraction_llm(self, input_data: dict, span: SpanWrapper) -> ContractAnalysisResult:
+    async def _call_extraction_llm(self, input_data: dict, span: SpanWrapper, max_retries: int = 1) -> ContractAnalysisResult:
         """
-        Call LLM to extract changes from aligned sections.
+        Call LLM to extract changes from aligned sections with retry on validation failure.
         
         Args:
             input_data: Dictionary with aligned sections
+            max_retries: Maximum number of retry attempts on validation failure
             
         Returns:
             ContractAnalysisResult: Validated extraction result
         """
         input_json = json.dumps(input_data, indent=2)
+        messages = [
+            {"role": "system", "content": EXTRACTION_PROMPT},
+            {"role": "user", "content": f"Analyze these aligned contract sections and extract all changes:\n\n{input_json}"}
+        ]
         
-        try:
-            # Async LLM call
-            completion = await client.chat.completions.create(
-                model=AI_MODEL,
-                messages=[
-                    {"role": "system", "content": EXTRACTION_PROMPT},
-                    {"role": "user", "content": f"Analyze these aligned contract sections and extract all changes:\n\n{input_json}"}
-                ],
-                temperature=0.0,
-                max_tokens=4000,
-                response_format={"type": "json_object"}
-            )
-            
-            response_content = completion.choices[0].message.content
-            
-            # Update trace with usage
-            span.update(
-                output=response_content,
-                usage={
-                    "input": completion.usage.prompt_tokens,
-                    "output": completion.usage.completion_tokens,
-                    "total": completion.usage.total_tokens
-                }
-            )
-            
-        except Exception as e:
-            span.error(f"LLM call failed: {str(e)}")
-            raise ValueError(f"LLM call failed: {str(e)}")
+        last_error = None
+        last_response = None
         
-        # Parse and validate response
-        return self._parse_and_validate(response_content)
+        for attempt in range(max_retries + 1):
+            try:
+                # Async LLM call
+                completion = await client.chat.completions.create(
+                    model=AI_MODEL,
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=4000,
+                    response_format={"type": "json_object"}
+                )
+                
+                response_content = completion.choices[0].message.content
+                last_response = response_content
+                
+                # Update trace with usage
+                span.update(
+                    output=response_content,
+                    usage={
+                        "input": completion.usage.prompt_tokens,
+                        "output": completion.usage.completion_tokens,
+                        "total": completion.usage.total_tokens
+                    },
+                    metadata={"attempt": attempt + 1}
+                )
+                
+                # Try to parse and validate
+                return self._parse_and_validate(response_content)
+                
+            except ValueError as e:
+                last_error = e
+                error_str = str(e)
+                
+                # Check if it's a count mismatch error that we can retry
+                if attempt < max_retries and "must match" in error_str and "topics_touched" in error_str:
+                    # Parse the response to get counts for the correction prompt
+                    try:
+                        parsed = json.loads(response_content)
+                        topics_count = len(parsed.get("topics_touched", []))
+                        summary_count = len(parsed.get("summary_of_the_change", []))
+                        
+                        # Add correction message to conversation
+                        correction_msg = CORRECTION_PROMPT.format(
+                            error_message=error_str,
+                            topics_count=topics_count,
+                            summary_count=summary_count
+                        )
+                        messages.append({"role": "assistant", "content": response_content})
+                        messages.append({"role": "user", "content": correction_msg})
+                        
+                        span.update(
+                            metadata={
+                                "retry_reason": "count_mismatch",
+                                "topics_count": topics_count,
+                                "summary_count": summary_count
+                            }
+                        )
+                        continue  # Retry with correction
+                    except json.JSONDecodeError:
+                        pass  # Can't parse, don't retry
+                
+                # No more retries or non-retryable error
+                raise
+                
+            except Exception as e:
+                span.error(f"LLM call failed: {str(e)}")
+                raise ValueError(f"LLM call failed: {str(e)}")
+        
+        # Should not reach here, but just in case
+        if last_error:
+            raise last_error
+        raise ValueError("Unexpected error in extraction LLM call")
     
     def _parse_and_validate(self, response_content: str) -> ContractAnalysisResult:
         """

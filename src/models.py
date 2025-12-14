@@ -140,6 +140,28 @@ class ParsedContractPage(BaseModel):
 # AGENT OUTPUT MODELS
 # =============================================================================
 
+class SectionReference(BaseModel):
+    """
+    Lightweight reference for alignment (LLM output only).
+    
+    Used for efficient alignment where LLM only identifies which sections
+    changed, without duplicating content. Content is attached programmatically.
+    """
+    
+    section_id: str = Field(
+        ...,
+        description="Section identifier (e.g., 'II', '2.1')"
+    )
+    section_title: str = Field(
+        ...,
+        description="Section title for readability"
+    )
+    has_changes: bool = Field(
+        ...,
+        description="Whether this section has differences"
+    )
+
+
 class SectionAlignment(BaseModel):
     """Alignment between corresponding sections in original and amended documents."""
     
@@ -163,6 +185,14 @@ class SectionAlignment(BaseModel):
         ...,
         description="Whether this section has differences"
     )
+    is_removed: bool = Field(
+        default=False,
+        description="True if section exists only in original (removed in amendment)"
+    )
+    is_added: bool = Field(
+        default=False,
+        description="True if section exists only in amended (new section)"
+    )
 
 
 class ContextualizationOutput(BaseModel):
@@ -179,14 +209,6 @@ class ContextualizationOutput(BaseModel):
         ...,
         min_length=1,
         description="List of aligned sections between documents"
-    )
-    sections_only_in_original: List[str] = Field(
-        default_factory=list,
-        description="Section IDs that exist only in original"
-    )
-    sections_only_in_amended: List[str] = Field(
-        default_factory=list,
-        description="Section IDs that exist only in amended"
     )
 
 
