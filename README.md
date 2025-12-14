@@ -317,7 +317,7 @@ Each contract analysis creates a **trace** containing:
 ### Filtering Traces
 
 Use filters to find specific traces:
-- **By contract**: Search for `contract_pair_id` in metadata
+- **By contract**: Search for `contract_id` in metadata
 - **By status**: Filter by `level=ERROR` to see failures
 - **By time**: Use date range filters for production monitoring
 

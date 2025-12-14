@@ -186,7 +186,8 @@ async def parse_contract_image(
         input_data={"image_path": str(image_path), "page_number": page_number},
         metadata={
             "session_id": getattr(session, 'session_id', None),
-            "contract_paid_id": getattr(session, 'contract_id', None),
+            "contract_id": getattr(session, 'contract_id', None),
+            "agent": "image_parser",
             "timestamp": datetime.datetime.now(datetime.UTC).isoformat()
         }
     )
@@ -304,7 +305,8 @@ async def parse_contract_folder(
         input_data={"folder_path": folder_path, "image_count": len(image_files)},
         metadata={
             "session_id": getattr(session, 'session_id', None),
-            "contract_paid_id": getattr(session, 'contract_id', None),
+            "contract_id": getattr(session, 'contract_id', None),
+            "agent": "image_parser",
             "timestamp": datetime.datetime.now(datetime.UTC).isoformat()
         }
     )

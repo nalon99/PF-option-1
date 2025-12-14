@@ -72,7 +72,7 @@ class TracingSession:
         self.session_name = session_name or f"Contract Analysis - {self.contract_id}"
         self.metadata = {
             "session_id": self.session_id,
-            "contract_pair_id": self.contract_id,
+            "contract_id": self.contract_id,
             "started_at": now
         }
         
@@ -87,7 +87,7 @@ class TracingSession:
         # Update trace with name and metadata
         self.root_span.update_trace(
             name=self.session_name,
-            input={"contract_pair_id": self.contract_id},
+            input={"contract_id": self.contract_id},
             metadata=self.metadata
         )
         print(f"📊 Tracing session started: {self.session_id}")
