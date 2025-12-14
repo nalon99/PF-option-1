@@ -2,11 +2,11 @@
 Contract Agent - Main Entry Point
 
 Entry point that:
-(1) scans data/test_contracts for contract pairs (each subfolder = one pair), 
-(2) calls multimodal LLM to parse images from original/ and amendment/ subfolders, 
-(3) executes Agent 1 (contextualization), 
-(4) executes Agent 2 (change extraction), 
-(5) validates output with Pydantic, 
+(1) accepts two folder paths as arguments (original and amendment contract images),
+(2) calls multimodal LLM to parse images from both folders,
+(3) executes Agent 1 (contextualization),
+(4) executes Agent 2 (change extraction),
+(5) validates output with Pydantic,
 (6) returns structured JSON.
 
 Must be runnable from command line.
@@ -15,11 +15,16 @@ Workflow:
     Image Parsing → Agent 1 (Contextualization) → Agent 2 (Extraction) → Output
 
 Usage:
-    python contract_agent.py              # Process all contract pairs
-    python contract_agent.py pair_1       # Process specific pair
-    python contract_agent.py pair_1 pair_2  # Process multiple specific pairs
+    # Direct mode: provide two folder paths
+    python contract_agent.py /path/to/original /path/to/amendment
+    python contract_agent.py /path/to/original /path/to/amendment --output results.json
 
-Contract folder structure:
+    # Batch mode: process from data/test_contracts/
+    python contract_agent.py --batch                    # Process all pairs
+    python contract_agent.py --batch pair_1             # Process specific pair
+    python contract_agent.py --batch pair_1 pair_2      # Process multiple pairs
+
+Contract folder structure (for batch mode):
     data/test_contracts/
     ├── pair_1/
     │   ├── original/     # Original contract images
@@ -29,6 +34,7 @@ Contract folder structure:
         └── amendment/
 """
 
+import argparse
 import asyncio
 import os
 import sys
@@ -390,20 +396,131 @@ async def process_all_pairs(pairs_to_process: List[Tuple[str, Path, Path]]):
     
 
 # =============================================================================
-# MAIN ENTRY POINT
+# DIRECT MODE: Process two folder paths
 # =============================================================================
 
-def main():
+async def process_direct_mode(
+    original_folder: str,
+    amendment_folder: str,
+    output_file: Optional[str] = None
+) -> Optional[ContractAnalysisResult]:
     """
-    Main entry point for command line usage.
+    Process a single contract pair from direct folder paths.
     
-    Usage:
-        python contract_agent.py              # Process all contract pairs
-        python contract_agent.py pair_1       # Process specific pair
-        python contract_agent.py pair_1 pair_2  # Process multiple specific pairs
+    Args:
+        original_folder: Path to folder with original contract images
+        amendment_folder: Path to folder with amendment contract images
+        output_file: Optional output file path (default: stdout + JSON in parent dir)
+        
+    Returns:
+        ContractAnalysisResult or None on error
+    """
+    # Generate a pair name from folder paths
+    orig_path = Path(original_folder).resolve()
+    amend_path = Path(amendment_folder).resolve()
+    pair_name = f"{orig_path.parent.name}" if orig_path.parent == amend_path.parent else "direct_analysis"
+    
+    print("\n" + "="*70)
+    print(f"CONTRACT AMENDMENT ANALYSIS")
+    print("="*70)
+    print(f"\n📂 Original:  {original_folder}")
+    print(f"📂 Amendment: {amendment_folder}")
+    
+    # Validate folders
+    print("\n🔍 Validating input folders...")
+    valid, msg = validate_folder(original_folder)
+    if not valid:
+        print(f"❌ Original folder: {msg}")
+        sys.exit(1)
+    print(f"✅ Original: {msg}")
+    
+    valid, msg = validate_folder(amendment_folder)
+    if not valid:
+        print(f"❌ Amendment folder: {msg}")
+        sys.exit(1)
+    print(f"✅ Amendment: {msg}")
+    
+    # Create tracing session
+    session = TracingSession(
+        contract_id=pair_name,
+        session_name=f"Contract Analysis - {pair_name}"
+    )
+    
+    try:
+        # Run analysis
+        result = await analyze_contract_amendment(
+            original_folder=original_folder,
+            amendment_folder=amendment_folder,
+            session=session
+        )
+        
+        # Output results
+        print("\n" + "="*70)
+        print("RESULTS")
+        print("="*70)
+        
+        result_json = result.model_dump()
+        
+        # Determine output file path
+        if output_file:
+            output_path = Path(output_file)
+        else:
+            # Default: save in parent of original folder
+            output_path = orig_path.parent / "extraction_output.json"
+        
+        # Save to file
+        with open(output_path, 'w') as f:
+            json.dump(result_json, f, indent=2)
+        print(f"\n💾 Results saved to: {output_path}")
+        
+        # Print summary
+        print("\n" + "-"*70)
+        print("📊 SUMMARY")
+        print("-"*70)
+        print(f"\nSections Changed ({len(result.sections_changed)}):")
+        for sec in result.sections_changed:
+            print(f"  • {sec}")
+        
+        print(f"\nTopics Touched ({len(result.topics_touched)}):")
+        for topic in result.topics_touched:
+            print(f"  • {topic}")
+        
+        print(f"\nChange Details ({len(result.summary_of_the_change)}):")
+        for i, summary in enumerate(result.summary_of_the_change, 1):
+            print(f"  {i}. {summary}")
+        
+        print("\n" + "="*70)
+        print("✅ ANALYSIS COMPLETE")
+        print("="*70 + "\n")
+        
+        # Print JSON to stdout as well
+        print("\n📄 JSON Output:")
+        print(json.dumps(result_json, indent=2))
+        
+        return result
+        
+    except Exception as e:
+        print(f"\n❌ Analysis failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
+    finally:
+        session.end()
+
+
+# =============================================================================
+# BATCH MODE: Process from test_contracts directory
+# =============================================================================
+
+def run_batch_mode(pair_names: Optional[List[str]] = None):
+    """
+    Process contract pairs from data/test_contracts/ directory.
+    
+    Args:
+        pair_names: Optional list of specific pair names to process
     """
     print("\n" + "="*70)
-    print("CONTRACT AMENDMENT ANALYZER")
+    print("CONTRACT AMENDMENT ANALYZER (BATCH MODE)")
     print("="*70)
     print(f"\n📂 Scanning for contracts in: {TEST_CONTRACTS_DIR}")
     
@@ -419,20 +536,17 @@ def main():
         print(f"   • {name}")
     
     # Determine which pairs to process
-    if len(sys.argv) > 1:
-        # Process specific pairs from command line
-        requested_pairs = sys.argv[1:]
+    if pair_names:
         pairs_to_process = [
             (name, orig, amend) 
             for name, orig, amend in all_pairs 
-            if name in requested_pairs
+            if name in pair_names
         ]
         
-        not_found = set(requested_pairs) - {name for name, _, _ in pairs_to_process}
+        not_found = set(pair_names) - {name for name, _, _ in pairs_to_process}
         if not_found:
             print(f"\n⚠️  Pairs not found: {', '.join(not_found)}")
     else:
-        # Process all pairs
         pairs_to_process = all_pairs
     
     if not pairs_to_process:
@@ -463,7 +577,6 @@ def main():
     
     # Process all pairs concurrently using asyncio
     print(f"\n🔄 Processing {len(pairs_to_process)} pair(s) concurrently...")
-    # Run the async processing
     pair_results = asyncio.run(process_all_pairs(pairs_to_process))
     
     # Collect successful results
@@ -490,6 +603,83 @@ def main():
     if len(results) < len(pairs_to_process):
         failed = len(pairs_to_process) - len(results)
         print(f"\n❌ Failed: {failed} pair(s)")
+        sys.exit(1)
+
+
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
+
+def main():
+    """
+    Main entry point for command line usage.
+    
+    Supports two modes:
+    1. Direct mode: python contract_agent.py <original_folder> <amendment_folder>
+    2. Batch mode:  python contract_agent.py --batch [pair_names...]
+    """
+    parser = argparse.ArgumentParser(
+        description="Analyze contract amendments using multimodal LLM and two-agent system.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Direct mode - process two folders
+  python contract_agent.py ./original ./amendment
+  python contract_agent.py /path/to/original /path/to/amendment --output results.json
+
+  # Batch mode - process from data/test_contracts/
+  python contract_agent.py --batch
+  python contract_agent.py --batch pair_1
+  python contract_agent.py --batch pair_1 pair_2
+        """
+    )
+    
+    # Direct mode arguments (positional)
+    parser.add_argument(
+        "original_folder",
+        nargs="?",
+        help="Path to folder containing original contract images"
+    )
+    parser.add_argument(
+        "amendment_folder",
+        nargs="?",
+        help="Path to folder containing amendment contract images"
+    )
+    parser.add_argument(
+        "--output", "-o",
+        help="Output file path for JSON results (default: extraction_output.json in parent folder)"
+    )
+    
+    # Batch mode arguments
+    parser.add_argument(
+        "--batch", "-b",
+        nargs="*",
+        metavar="PAIR",
+        help="Run in batch mode. Optionally specify pair names (e.g., pair_1 pair_2)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Determine which mode to run
+    if args.batch is not None:
+        # Batch mode
+        pair_names = args.batch if args.batch else None
+        run_batch_mode(pair_names)
+    elif args.original_folder and args.amendment_folder:
+        # Direct mode with two folder paths
+        asyncio.run(process_direct_mode(
+            original_folder=args.original_folder,
+            amendment_folder=args.amendment_folder,
+            output_file=args.output
+        ))
+    else:
+        # No arguments - show help
+        parser.print_help()
+        print("\n" + "="*70)
+        print("ERROR: Please provide either:")
+        print("  1. Two folder paths: python contract_agent.py <original> <amendment>")
+        print("  2. Batch mode flag:  python contract_agent.py --batch [pair_names...]")
+        print("="*70)
         sys.exit(1)
 
 
