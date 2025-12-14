@@ -383,8 +383,61 @@ pytest tests/test_image_parsing.py -v
 | `test_validation.py` | Pydantic model validation for `ContractAnalysisResult`, valid/invalid outputs, field validators |
 | `test_agents.py` | Agent handoff mechanism, `ContextualizationOutput` → `ExtractionAgent` data flow |
 | `test_image_parsing.py` | Image validation, base64 encoding, MIME type detection, test data existence |
+| `test_accuracy.py` | Image parser accuracy ≥95% using Levenshtein distance (integration test, requires API) |
 
-### Expected Output
+### Image Parser Accuracy Test
+
+Tests that `image_parser.py` achieves ≥95% text accuracy when parsing contract images.
+
+**Run the accuracy test:**
+```bash
+pytest tests/test_accuracy.py::TestAccuracyAllPairs -v -s -m integration
+```
+
+**Accuracy formulas (Levenshtein distance):**
+```
+CER (Character Error Rate) = edit_distance(parsed, ground_truth) / len(ground_truth)
+Character Accuracy = 1 - CER
+
+WER (Word Error Rate) = word_edit_distance(parsed, ground_truth) / word_count(ground_truth)
+Word Accuracy = 1 - WER
+```
+
+**Expected output:**
+```
+============================================================
+IMAGE PARSER ACCURACY TEST
+Using Levenshtein distance for CER/WER calculation
+============================================================
+
+📂 Testing: pair_1/original
+   ✅ Character Accuracy: 97.2% (CER: 2.80%)
+      Word Accuracy: 96.5% (WER: 3.50%)
+
+📂 Testing: pair_1/amendment
+   ✅ Character Accuracy: 96.8% (CER: 3.20%)
+
+...
+
+============================================================
+SUMMARY
+============================================================
+Contract                   Accuracy        CER     Status
+-------------------------------------------------------
+pair_1/original               97.2%      2.80%       PASS
+pair_1/amendment              96.8%      3.20%       PASS
+pair_2/original               97.0%      3.00%       PASS
+pair_2/amendment              96.5%      3.50%       PASS
+-------------------------------------------------------
+Average                       96.9%      3.12%
+============================================================
+
+✅ ALL CONTRACTS PASSED ≥95% ACCURACY TEST
+```
+
+> **Note:** This test makes actual LLM API calls (~20 calls for 4 contracts × 5 pages). Requires valid `OPENAI_API_KEY`.
+
+### Unit Test Expected Output
 
 ```
 tests/test_validation.py::TestContractAnalysisResultValidation::test_valid_output_passes_validation PASSED

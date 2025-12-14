@@ -147,7 +147,7 @@ class ContextualizationAgent:
         span = None
         if self.session:
             span = self.session.create_generation(
-                name="contextualize_single_call",
+                name="agent_contextualize",
                 model=LANGFUSE_MODEL_NAME,
                 input_data={
                     "original_pages": len(original_pages),

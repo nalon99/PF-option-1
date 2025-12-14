@@ -252,7 +252,7 @@ class ExtractionAgent:
                 )
                 
                 # Try to parse and validate
-                return self._parse_and_validate(response_content)
+                return self.validate_output(response_content)
                 
             except ValueError as e:
                 last_error = e
@@ -262,7 +262,7 @@ class ExtractionAgent:
                 # The strings "must match" and "topics_touched" come from the ValueError
                 # raised in models.py ContractAnalysisResult.model_post_init(), which gets
                 # wrapped by Pydantic's ValidationError and converted back to ValueError
-                # in _parse_and_validate(). The final error message looks like:
+                # in validate_output(). The final error message looks like:
                 # "Pydantic validation failed: ... Number of topics_touched (X) must match ..."
                 if attempt < max_retries and "must match" in error_str and "topics_touched" in error_str:
                     # Parse the response to get counts for the correction prompt
@@ -303,7 +303,7 @@ class ExtractionAgent:
             raise last_error
         raise ValueError("Unexpected error in extraction LLM call")
     
-    def _parse_and_validate(self, response_content: str) -> ContractAnalysisResult:
+    def validate_output(self, response_content: str) -> ContractAnalysisResult:
         """
         Parse LLM response and validate with Pydantic.
         
