@@ -346,7 +346,59 @@ Key techniques:
 
 ---
 
-## 9. Known Limitations
+## 9. Running Tests
+
+The project includes automated tests for validation, agent handoff, and image parsing.
+
+### Install Test Dependencies
+
+```bash
+pip install pytest pytest-asyncio
+```
+
+### Run All Tests
+
+```bash
+# From project root
+pytest tests/ -v
+```
+
+### Run Specific Test Files
+
+```bash
+# Pydantic validation tests (valid and invalid outputs)
+pytest tests/test_validation.py -v
+
+# Agent handoff tests (verify Agent 2 receives Agent 1's output)
+pytest tests/test_agents.py -v
+
+# Image parsing tests (bonus)
+pytest tests/test_image_parsing.py -v
+```
+
+### Test Coverage
+
+| Test File | What It Tests |
+|-----------|---------------|
+| `test_validation.py` | Pydantic model validation for `ContractAnalysisResult`, valid/invalid outputs, field validators |
+| `test_agents.py` | Agent handoff mechanism, `ContextualizationOutput` → `ExtractionAgent` data flow |
+| `test_image_parsing.py` | Image validation, base64 encoding, MIME type detection, test data existence |
+
+### Expected Output
+
+```
+tests/test_validation.py::TestContractAnalysisResultValidation::test_valid_output_passes_validation PASSED
+tests/test_validation.py::TestContractAnalysisResultValidation::test_empty_sections_changed_fails PASSED
+tests/test_validation.py::TestContractAnalysisResultValidation::test_mismatched_counts_fails PASSED
+tests/test_agents.py::TestAgentHandoff::test_contextualization_output_structure PASSED
+tests/test_agents.py::TestAgentHandoff::test_agent2_receives_agent1_output_type PASSED
+tests/test_agents.py::TestAgentHandoff::test_handoff_filters_changed_sections PASSED
+...
+```
+
+---
+
+## 10. Known Limitations
 
 ### Maximum Contract Size
 - ~50-60 pages per contract (128K context window limit)
