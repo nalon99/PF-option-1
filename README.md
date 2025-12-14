@@ -85,7 +85,7 @@ Finally, the validated output is saved as JSON, with all steps traced in Langfus
 
 1. **Clone the repository:**
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/nalon99/PF-option-1.git
    cd PF-Option-1
    ```
 
@@ -112,7 +112,7 @@ Finally, the validated output is saved as JSON, with all steps traced in Langfus
    OPENAI_MODEL=gpt-4o
    
    # Optional: Use OpenRouter instead of OpenAI directly
-   USE_OPEN_ROUTER=false
+   USE_OPEN_ROUTER=true
    
    # Langfuse Configuration (get keys from https://cloud.langfuse.com)
    LANGFUSE_PUBLIC_KEY=pk-lf-your-public-key
@@ -269,15 +269,21 @@ The system produces a JSON file with three required fields, validated by Pydanti
 
 ### Why Two Agents Instead of One?
 
-The two-agent architecture separates **understanding** from **extraction**, mirroring how legal professionals analyze documents. Agent 1 (Contextualization) focuses on document structure: merging multi-page sections, aligning corresponding sections between documents, and identifying where changes exist. Agent 2 (Extraction) focuses on content analysis: understanding what specifically changed and grouping related changes by business topic.
+The two-agent architecture separates **understanding** from **extraction**, mirroring how legal professionals analyze documents.  
+- Agent 1 (Contextualization) focuses on document structure: merging multi-page sections, aligning corresponding sections between documents, and identifying where changes exist.  
+- Agent 2 (Extraction) focuses on content analysis: understanding what specifically changed and grouping related changes by business topic.
 
-This separation provides several benefits: (1) **cleaner prompts** - each agent has a focused task rather than a complex multi-step prompt; (2) **better accuracy** - Agent 2 only receives sections marked as changed, reducing noise and context length; (3) **debuggability** - intermediate output (`contextualization_output.json`) can be inspected to understand alignment decisions before extraction.
+This separation provides several benefits:  
+1. **cleaner prompts** - each agent has a focused task rather than a complex multi-step prompt;  
+2. **better accuracy** - Agent 2 only receives sections marked as changed, reducing noise and context length;  
+3. **debuggability** - intermediate output (`contextualization_output.json`) can be inspected to understand alignment decisions before extraction.
 
 ### Why GPT-4o?
 
 GPT-4o was selected for its **native multimodal capabilities** and **large context window** (128K tokens). Unlike separate OCR + text LLM pipelines, GPT-4o processes images directly, understanding document layout, tables, and formatting in context. This eliminates OCR preprocessing errors and handles real-world document quality variations (scans, photos, varying resolutions).
 
-The 128K context window supports contracts up to ~50-60 pages per document, sufficient for most legal contracts. GPT-4o also provides reliable JSON mode output (`response_format={"type": "json_object"}`), critical for producing valid structured output.
+The 128K context window supports contracts up to ~50-60 pages per document, sufficient for most legal contracts.  
+GPT-4o also provides reliable JSON mode output (`response_format={"type": "json_object"}`), critical for producing valid structured output.
 
 ### Prompt Engineering Strategy
 
@@ -384,14 +390,22 @@ pytest tests/test_image_parsing.py -v
 | `test_agents.py` | Agent handoff mechanism, `ContextualizationOutput` → `ExtractionAgent` data flow |
 | `test_image_parsing.py` | Image validation, base64 encoding, MIME type detection, test data existence |
 | `test_accuracy.py` | Image parser accuracy ≥95% using Levenshtein distance (integration test, requires API) |
+| `test_end_to_end.py` | Full pipeline: Images → Parser → Agent 1 → Agent 2 → Output (integration test, requires API) |
 
 ### Image Parser Accuracy Test
 
 Tests that `image_parser.py` achieves ≥95% text accuracy when parsing contract images.
 
-**Run the accuracy test:**
 ```bash
-pytest tests/test_accuracy.py::TestAccuracyAllPairs -v -s -m integration
+pytest tests/test_accuracy.py -v -s -m integration
+```
+
+### End-to-End Integration Test
+
+Tests the complete pipeline: Images → Parser → Agent 1 → Agent 2 → Validated Output.
+
+```bash
+pytest tests/test_end_to_end.py -v -s -m integration
 ```
 
 **Accuracy formulas (Levenshtein distance):**
