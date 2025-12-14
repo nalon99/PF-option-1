@@ -5,15 +5,13 @@
     "VI. LIMITATION OF LIABILITY"
   ],
   "topics_touched": [
-    "Contract Duration",
-    "Monthly Fee",
-    "Late Payment Interest",
+    "Contract Duration and Termination",
+    "Payment Terms",
     "Liability Cap"
   ],
   "summary_of_the_change": [
-    "Contract term extended from 24 to 36 months (Sec. 2.1).",
-    "Monthly fee increased from 15,000 USD to 18,000 USD (Sec. 3.1).",
-    "Late payment interest rate increased from 1.5% to 2.0% per month (Sec. 3.2).",
+    "Contract term extended from 24 to 36 months, cure period for breach extended from 15 to 30 days, and notice period for termination for convenience extended from 60 to 90 days (Sec. 2.1, 2.2, 2.3).",
+    "Monthly fee increased from $15,000 to $18,000 and late payment interest increased from 1.5% to 2.0% (Sec. 3.1, 3.2).",
     "Liability cap increased from three months to six months of fees paid (Sec. 6.2)."
   ]
 }

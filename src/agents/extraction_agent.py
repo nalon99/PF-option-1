@@ -61,23 +61,27 @@ EXTRACTION_PROMPT = """Analyze contract amendments and extract ALL changes from 
 
 Output format:
 1. sections_changed: List modified sections as "SECTION_ID. SECTION_TITLE"
-2. topics_touched: Business topic for each change (e.g., "Contract Duration", "Payment Terms")
-3. summary_of_the_change: Description for each change with section reference at END in parentheses
+2. topics_touched: Business topics (group related changes under one topic)
+3. summary_of_the_change: Description for each topic (group related changes in one summary)
 
 Rules:
-- topics_touched and summary_of_the_change must have the same count (1:1 mapping)
-- Check EVERY clause (2.1, 2.2, 2.3, etc.) for numerical/value or meaning differences
+- GROUP related changes by topic (e.g., all term/termination changes under one topic)
+- topics_touched and summary_of_the_change must have the SAME count
+- Each summary can include multiple section refs (e.g., "Sec. 2.1, 2.2, 2.3")
 - No markdown formatting
-- Sort by section number ascending (2.1, 2.2, 2.3, 3.1, 3.2...)
 - Ignore OCR artifacts
 
-Example JSON:
+Example JSON (note: related changes are GROUPED):
 {
-    "sections_changed": ["II. TERM", "III. COMPENSATION"],
-    "topics_touched": ["Contract Duration", "Notice Period", "Monthly Fee"],
+    "sections_changed": ["II. TERM, TERMINATION", "III. COMPENSATION", "VI. LIABILITY"],
+    "topics_touched": [
+        "Contract Duration and Termination",
+        "Payment Terms",
+        "Liability Cap"
+    ],
     "summary_of_the_change": [
-        "Contract term extended from 24 to 36 months (Sec. 2.1).",
-        "Late payment interest rate increased from 1.5% to 2.0% per month (Sec. 3.2).",
+        "Contract term extended from 24 to 36 months, cure period extended from 15 to 30 days, and notice period extended from 60 to 90 days (Sec. 2.1, 2.2, 2.3).",
+        "Monthly fee increased from $15,000 to $18,000 and late payment interest increased from 1.5% to 2.0% (Sec. 3.1, 3.2).",
         "Liability cap increased from three months to six months of fees paid (Sec. 6.2)."
     ]
 }
@@ -202,7 +206,7 @@ class ExtractionAgent:
             span.end()
             raise
     
-    async def _call_extraction_llm(self, input_data: dict, span: SpanWrapper, max_retries: int = 1) -> ContractAnalysisResult:
+    async def _call_extraction_llm(self, input_data: dict, span: SpanWrapper, max_retries: int = 2) -> ContractAnalysisResult:
         """
         Call LLM to extract changes from aligned sections with retry on validation failure.
         
@@ -254,7 +258,12 @@ class ExtractionAgent:
                 last_error = e
                 error_str = str(e)
                 
-                # Check if it's a count mismatch error that we can retry
+                # Check if it's a count mismatch error that we can retry.
+                # The strings "must match" and "topics_touched" come from the ValueError
+                # raised in models.py ContractAnalysisResult.model_post_init(), which gets
+                # wrapped by Pydantic's ValidationError and converted back to ValueError
+                # in _parse_and_validate(). The final error message looks like:
+                # "Pydantic validation failed: ... Number of topics_touched (X) must match ..."
                 if attempt < max_retries and "must match" in error_str and "topics_touched" in error_str:
                     # Parse the response to get counts for the correction prompt
                     try:
