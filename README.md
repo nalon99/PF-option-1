@@ -362,10 +362,20 @@ The project includes automated tests for validation, agent handoff, and image pa
 pip install pytest pytest-asyncio
 ```
 
-### Run All Tests
+### Run Unit Tests (No LLM API Calls)
 
 ```bash
-# From project root
+# Run only unit tests - FREE, no API calls
+pytest tests/ -v -m "not integration"
+```
+
+This runs `test_validation.py`, `test_agents.py`, and non-integration tests from `test_image_parsing.py`.
+
+### Run All Tests (Including Integration)
+
+```bash
+# WARNING: Integration tests consume LLM API credits!
+# Estimated cost: ~$0.40-0.80 per full run (GPT-4o)
 pytest tests/ -v
 ```
 
@@ -392,19 +402,21 @@ pytest tests/test_image_parsing.py -v
 | `test_accuracy.py` | Image parser accuracy ≥95% using Levenshtein distance (integration test, requires API) |
 | `test_end_to_end.py` | Full pipeline: Images → Parser → Agent 1 → Agent 2 → Output (integration test, requires API) |
 
-### Image Parser Accuracy Test
+### Image Parser Accuracy Test (⚠️ Costs API Credits)
 
 Tests that `image_parser.py` achieves ≥95% text accuracy when parsing contract images.
 
 ```bash
+# ~20 LLM calls, ~$0.10-0.20 per run
 pytest tests/test_accuracy.py -v -s -m integration
 ```
 
-### End-to-End Integration Test
+### End-to-End Integration Test (⚠️ Costs API Credits)
 
 Tests the complete pipeline: Images → Parser → Agent 1 → Agent 2 → Validated Output.
 
 ```bash
+# ~12 LLM calls per contract pair, ~$0.20-0.40 per test
 pytest tests/test_end_to_end.py -v -s -m integration
 ```
 

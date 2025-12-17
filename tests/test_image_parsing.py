@@ -250,32 +250,3 @@ class TestTestContractsExist:
             pytest.skip("Test contracts not available")
 
 
-# =============================================================================
-# INTEGRATION TESTS (require API keys - marked for separate execution)
-# =============================================================================
-
-@pytest.mark.integration
-class TestImageParsingIntegration:
-    """
-    Integration tests that require OpenAI API.
-    Run with: pytest -m integration tests/test_image_parsing.py
-    """
-
-    @pytest.fixture
-    def test_image_path(self):
-        """Get path to a test image."""
-        return Path(__file__).parent.parent / "data" / "test_contracts" / "pair_1" / "original" / "page_01.png"
-
-    @pytest.mark.skip(reason="Requires API key and makes actual API calls")
-    def test_parse_single_image(self, test_image_path):
-        """Test parsing a single contract image."""
-        # This test would require actual API calls
-        # Skipped by default to avoid API costs
-        pass
-
-    @pytest.mark.skip(reason="Requires API key and makes actual API calls")
-    def test_parse_folder(self):
-        """Test parsing all images in a folder."""
-        # This test would require actual API calls
-        # Skipped by default to avoid API costs
-        pass
